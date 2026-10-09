@@ -118,6 +118,8 @@ The speech-bubble icon in the top bar opens a chat with Claude Code on the compu
 
 The API: `GET /claude/folders`, `GET /claude/chats`, `GET /claude/chats/<id>?from=<turn>` (turns from that index, which the app polls every second while Claude works), `POST /claude/chats` with `{cwd, text}`, `POST /claude/chats/<id>/messages` with `{text}` (409 while a reply is running), `POST /claude/chats/<id>/stop` and `DELETE /claude/chats/<id>`.
 
+**Verified** (October 9, 2026) live on a temporary service instance (the running service had the page switched off): a new chat in `~/Documents` ran Bash in auto mode and answered in 11 seconds on Opus with the subscription login. A second message resumed the same session and remembered the answer. The chat list and delete worked. On the emulator (Android 14, build 29859435, through the restarted service), the page opened from the top bar, a message ran `pwd` in auto mode, and the reply, its Bash rows and a weekly-limit note appeared. Not yet tried on the phone.
+
 ## Options and behavior
 
 - Defaults from your October 9 cv-refactor preferences: fully remote, Romania/Europe/worldwide eligibility, contracts first, backend/AI/Python/Go focus.
@@ -151,7 +153,6 @@ The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`
 
 ## Verification (October 9, 2026)
 
-- Talk to Claude, live, on a temporary service instance (the running service had the page switched off): a new chat in `~/Documents` ran Bash in auto mode and answered in 11 seconds on Opus with the subscription login. A second message resumed the same session and remembered the answer. The chat list and delete worked. On the emulator (Android 14, build 29859435, through the restarted service), the page opened from the top bar, a message ran `pwd` in auto mode, and the reply, its Bash rows and a weekly-limit note appeared. Not yet tried on the phone.
 - 141 Python tests and 31 Flutter tests passed; `flutter analyze` reported no issues.
 - Application tracking: a dry run of the Gmail import against a copy of `applied.json` on a temporary instance exposed two migration bugs, both fixed and tested: old entries without `match`, and a duplicate of the migrated confirmation email. A second run changed nothing. The real list then held 16 entries, all with a channel and 2 rejected, Proxify still a badge entry and Jobgether still role-only. On the emulator (build 29859344), the stats matched the data (16 applications, 2 heard back, a 3-day median first reply), and a follow-up date set in the sheet reached the service and was cleared again.
 - CV download, emulator (Android 14, build 29859312): `GET /cv` returned the 43,366-byte PDF locally and through the Tailscale address, and 401 without the token. The top-bar button saved `Bogdan-Gherghina-CV.pdf` to Downloads, byte-identical to `cv/`. **Open** showed it in the Drive PDF viewer. A second tap replaced the same file instead of adding a copy.
