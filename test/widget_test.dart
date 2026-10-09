@@ -67,6 +67,8 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).first,
     );
+    // The scroll lands on the next frame; tap after it.
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Dismiss'));
     await tester.pumpAndSettle();
     expect((await SharedPreferences.getInstance()).getStringList('dismissed'), [
@@ -79,6 +81,7 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Restore'));
     await tester.pumpAndSettle();
     expect(
@@ -138,6 +141,79 @@ void main() {
     await tester.tap(find.text('Saved').last);
     await tester.pumpAndSettle();
     expect(find.text('0 saved roles'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a dropdown narrows results to the source that returned them', (
+    tester,
+  ) async {
+    Map<String, dynamic> job(String id, String title, List<String> sources) => {
+      'id': id,
+      'title': title,
+      'company': 'Example',
+      'location': 'Worldwide',
+      'eligibility': 'worldwide',
+      'type': 'contract',
+      'score': 10,
+      'sources': sources,
+      'matched': {'core': []},
+      'description': 'Build APIs.',
+      'url': 'https://example.com/$id',
+    };
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([
+        job('one', 'Adzuna Role', ['adzuna']),
+        job('two', 'Remotive Role', ['remotive']),
+        job('three', 'Merged Role', ['remotive', 'himalayas']),
+      ]),
+      'updated': '2026-10-09T10:00:00Z',
+    });
+    await tester.pumpWidget(const JobsApp());
+    await tester.pumpAndSettle();
+    final list = find.byType(Scrollable).first;
+    final dropdown = find.byType(DropdownButtonFormField<String>);
+    Future<void> reveal(Finder finder) async {
+      await tester.scrollUntilVisible(finder, 200, scrollable: list);
+      await tester.pumpAndSettle();
+    }
+
+    await reveal(dropdown);
+    expect(find.text('3 opportunities'), findsOneWidget);
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    // Most roles first; a merged listing counts for both of its sources.
+    final names = tester
+        .widgetList<DropdownMenuItem<String>>(
+          find.byType(DropdownMenuItem<String>),
+        )
+        .map((i) => (i.child as Text).data)
+        .toSet()
+        .toList();
+    expect(names, [
+      'All sources · 3 roles',
+      'Remotive · 2 roles',
+      'Adzuna · 1 role',
+      'Himalayas · 1 role',
+    ]);
+    await tester.tap(find.text('Remotive · 2 roles').last);
+    await tester.pumpAndSettle();
+    expect(find.text('2 opportunities'), findsOneWidget);
+    await reveal(find.text('Merged Role'));
+    expect(find.text('Remotive Role'), findsOneWidget);
+    expect(find.text('Adzuna Role'), findsNothing);
+    // The choice holds on Saved, where nothing from Remotive is saved yet.
+    await tester.tap(find.text('Saved').last);
+    await tester.pumpAndSettle();
+    expect(find.text('0 saved roles'), findsOneWidget);
+    expect(find.text('Remotive · 0 roles'), findsOneWidget);
+    await tester.tap(find.text('Discover').last);
+    await tester.pumpAndSettle();
+    await reveal(dropdown);
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('All sources · 3 roles').last);
+    await tester.pumpAndSettle();
+    expect(find.text('3 opportunities'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

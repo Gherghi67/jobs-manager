@@ -79,6 +79,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       status = '',
       updated = '',
       filter = '';
+  // The source the results list is narrowed to; empty shows every source.
+  String sourceFilter = '';
   String? error, appliedNote;
   bool loading = true, busy = false, cached = false, savingCv = false;
   int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
@@ -755,11 +757,32 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                   .contains(filter.toLowerCase()),
         )
         .toList();
+    // How many of this view's roles each source returned. A listing merged
+    // from several sources counts for each of them. The Applied tab tracks
+    // applications rather than results, so it has no source filter.
+    final perSource = <String, int>{};
+    if (tab != 2) {
+      for (final j in matching) {
+        for (final s in j.sources) {
+          perSource[s] = (perSource[s] ?? 0) + 1;
+        }
+      }
+    }
+    final sourceKeys = perSource.keys.toList()
+      ..sort((a, b) {
+        final byCount = perSource[b]!.compareTo(perSource[a]!);
+        return byCount != 0 ? byCount : sourceName(a).compareTo(sourceName(b));
+      });
+    // A chosen source stays listed after a search or tab change leaves it
+    // with no roles, so the choice stays visible.
+    if (sourceFilter.isNotEmpty && !perSource.containsKey(sourceFilter)) {
+      sourceKeys.add(sourceFilter);
+    }
+    final shown = tab == 2 || sourceFilter.isEmpty
+        ? matching
+        : matching.where((j) => j.sources.contains(sourceFilter)).toList();
     // Roles at companies already applied to (badge entries) go last.
-    final visible = [
-      ...matching.where((j) => !badged(j)),
-      ...matching.where(badged),
-    ];
+    final visible = [...shown.where((j) => !badged(j)), ...shown.where(badged)];
     return Scaffold(
       appBar: AppBar(
         title: const Row(
@@ -1046,6 +1069,36 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                       prefixIcon: Icon(Icons.search),
                     ),
                   ),
+                  if (sourceKeys.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: sourceFilter,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Returned by',
+                        prefixIcon: Icon(Icons.filter_alt_outlined),
+                      ),
+                      items: [
+                        DropdownMenuItem(
+                          value: '',
+                          child: Text(
+                            'All sources · ${plural(matching.length, 'role')}',
+                          ),
+                        ),
+                        for (final s in sourceKeys)
+                          DropdownMenuItem(
+                            value: s,
+                            child: Text(
+                              '${sourceName(s)} · ${plural(perSource[s] ?? 0, 'role')}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (v) => setState(() {
+                        sourceFilter = v ?? '';
+                      }),
+                    ),
+                  ],
                   const SizedBox(height: 20),
                   Row(
                     children: [
