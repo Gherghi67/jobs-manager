@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'applications.dart' show shortDate;
 
 const _ink = Color(0xFF172C2A);
 const _accent = Color(0xFF146B57);
@@ -11,10 +12,11 @@ const _muted = Color(0xFF63716D);
 const _blocked = Color(0xFFB3261E);
 const _codeBackground = Color(0xFFECEEE8);
 
+// Short enough that each chip fits on one line of a phone screen.
 const suggestions = [
-  'Check my Gmail for new replies to my job applications',
+  'Check Gmail for application replies',
   'What changed in my projects today?',
-  'Draft a short follow-up email for my latest application',
+  'Draft a follow-up for an application',
 ];
 
 // When a chat was last active, in words.
@@ -37,7 +39,7 @@ String chatAge(String iso, DateTime now) {
 }
 
 // The service reports a usage warning only when Claude is near or at a limit.
-String limitNote(Map limit) {
+String limitNote(Map limit, {DateTime? now}) {
   final kind = switch (limit['kind']) {
     'five_hour' => '5-hour',
     'seven_day' => 'weekly',
@@ -52,9 +54,16 @@ String limitNote(Map limit) {
           (limit['resets_at'] as num).toInt() * 1000,
         ).toLocal()
       : null;
+  final today = now ?? DateTime.now();
+  final time = resets == null
+      ? ''
+      : '${resets.hour.toString().padLeft(2, '0')}:${resets.minute.toString().padLeft(2, '0')}';
+  // Weekly limits reset days away, so the day matters as much as the time.
   final when = resets == null
       ? ''
-      : ' It resets at ${resets.hour.toString().padLeft(2, '0')}:${resets.minute.toString().padLeft(2, '0')}.';
+      : DateUtils.isSameDay(resets, today)
+      ? ' It resets at $time.'
+      : ' It resets on ${shortDate(resets)} at $time.';
   return limit['status'] == 'rejected'
       ? 'You have reached your $kind limit.$when'
       : 'You have used $used of your $kind limit.$when';

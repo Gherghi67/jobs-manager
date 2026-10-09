@@ -65,6 +65,21 @@ void main() {
       limitNote({'status': 'rejected', 'kind': 'seven_day'}),
       'You have reached your weekly limit.',
     );
+    final reset = DateTime(2026, 10, 12, 4);
+    final limit = {
+      'status': 'allowed_warning',
+      'kind': 'seven_day',
+      'used': 0.96,
+      'resets_at': reset.millisecondsSinceEpoch ~/ 1000,
+    };
+    expect(
+      limitNote(limit, now: DateTime(2026, 10, 9, 20, 17)),
+      'You have used 96% of your weekly limit. It resets on 12 Oct at 04:00.',
+    );
+    expect(
+      limitNote(limit, now: DateTime(2026, 10, 12, 1)),
+      'You have used 96% of your weekly limit. It resets at 04:00.',
+    );
     final now = DateTime.utc(2026, 10, 9, 16, 30);
     expect(chatAge('2026-10-09T16:25:00Z', now), '5 min ago');
     expect(chatAge('2026-10-09T13:30:00Z', now), '3 h ago');
