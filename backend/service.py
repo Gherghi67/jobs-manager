@@ -14,11 +14,13 @@ import shutil
 import sys
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT.parent / 'artifacts'
+CV_DIR = Path(os.environ.get('JOBS_CV_DIR') or ROOT.parent / 'cv')
 APPLIED_FILE = Path(os.environ.get('JOBS_APPLIED_FILE') or ROOT / 'applied.json')
 sys.path.insert(0, str(ROOT / 'vendor'))
 import adzuna_search as az
@@ -458,6 +460,22 @@ def app_release():
 app_release.cached = (None, '')
 
 
+def cv_file():
+    """The newest PDF in cv/, which the app saves to the phone's Downloads."""
+    try:
+        pdfs = [p for p in CV_DIR.iterdir() if p.suffix.lower() == '.pdf' and p.is_file()]
+    except OSError:
+        return None
+    return max(pdfs, key=lambda p: p.stat().st_mtime_ns, default=None)
+
+
+def download_name(path):
+    # Header values must stay ASCII (Ș becomes S); the phone keeps this name in Downloads.
+    name = unicodedata.normalize('NFKD', path.name).encode('ascii', 'ignore').decode()
+    name = re.sub(r'[^A-Za-z0-9._ -]+', '-', name).strip(' .-')
+    return name if name.lower().endswith('.pdf') and len(name) > 4 else 'CV.pdf'
+
+
 class Handler(BaseHTTPRequestHandler):
     engine = Engine()
     token = ''
@@ -494,21 +512,29 @@ class Handler(BaseHTTPRequestHandler):
             except StoreError as exc:
                 self.respond(500, {'error': str(exc)})
         elif path == '/app/fieldwork.apk':
-            self.send_apk()
+            self.send_file(APP_DIR / 'fieldwork.apk', 'application/vnd.android.package-archive',
+                           'No app build is published on the service.')
+        elif path == '/cv':
+            cv, missing = cv_file(), 'No CV on the service. Put your PDF in the cv folder on your computer.'
+            if cv is None:
+                return self.respond(404, {'error': missing})
+            self.send_file(cv, 'application/pdf', missing, f'attachment; filename="{download_name(cv)}"')
         elif path.startswith('/search/'):
             run = self.engine.get(path.rsplit('/', 1)[1])
             self.respond(200 if run else 404, run or {'error': 'Search expired. Start a new search.'})
         else:
             self.respond(404, {'error': 'Not found'})
-    def send_apk(self):
+    def send_file(self, path, content_type, missing, disposition=None):
         try:
-            f = (APP_DIR / 'fieldwork.apk').open('rb')
+            f = path.open('rb')
         except OSError:
-            return self.respond(404, {'error': 'No app build is published on the service.'})
+            return self.respond(404, {'error': missing})
         with f:
             self.send_response(200)
-            self.send_header('Content-Type', 'application/vnd.android.package-archive')
+            self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(os.fstat(f.fileno()).st_size))
+            if disposition:
+                self.send_header('Content-Disposition', disposition)
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             try:

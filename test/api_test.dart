@@ -207,6 +207,54 @@ void main() {
       throwsA(predicate((e) => e.toString().contains('incomplete'))),
     );
   });
+  test('files arrive with the name the service gives them', () async {
+    final api = JobsApi(
+      'https://service.example',
+      'test-token',
+      client: MockClient((r) async {
+        expect(r.url.path, '/cv');
+        expect(r.headers['Authorization'], 'Bearer test-token');
+        return http.Response.bytes(
+          [37, 80, 68, 70],
+          200,
+          headers: {
+            'content-type': 'application/pdf',
+            'content-disposition':
+                'attachment; filename="Bogdan-Gherghina-CV.pdf"',
+          },
+        );
+      }),
+    );
+    final cv = await api.file('/cv');
+    expect(cv.name, 'Bogdan-Gherghina-CV.pdf');
+    expect(cv.bytes, [37, 80, 68, 70]);
+    final unnamed = JobsApi(
+      'https://service.example',
+      't',
+      client: MockClient((_) async => http.Response.bytes([1], 200)),
+    );
+    expect((await unnamed.file('/cv')).name, isNull);
+    final missing = JobsApi(
+      'https://service.example',
+      't',
+      client: MockClient(
+        (_) async => http.Response('{"error":"No CV on the service."}', 404),
+      ),
+    );
+    await expectLater(
+      missing.file('/cv'),
+      throwsA(predicate((e) => e.toString().contains('No CV on the service.'))),
+    );
+    final proxy = JobsApi(
+      'https://service.example',
+      't',
+      client: MockClient((_) async => http.Response('<html>', 502)),
+    );
+    await expectLater(
+      proxy.file('/cv'),
+      throwsA(predicate((e) => e.toString().contains('HTTP 502'))),
+    );
+  });
   test('only a newer published build counts as an update', () {
     final installed = {'versionCode': 29700000, 'versionName': '1.0.0'};
     expect(

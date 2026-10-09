@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -106,6 +107,38 @@ class JobsApi {
     if (total > 0 && received != total) {
       throw Exception('The download was incomplete. Try again.');
     }
+  }
+
+  // Fetches a small file, such as the CV, with the name the service gives it.
+  Future<({Uint8List bytes, String? name})> file(String path) async {
+    final uri = _uri(path);
+    final http.Response response;
+    try {
+      response = await client
+          .get(uri, headers: {'Authorization': 'Bearer $token'})
+          .timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      throw Exception(
+        'The service at ${uri.origin} did not respond in time. Try again shortly.',
+      );
+    } on http.ClientException {
+      throw _unreachable(uri);
+    }
+    if (response.statusCode != 200) {
+      String? error;
+      try {
+        error = (jsonDecode(response.body) as Map)['error'] as String?;
+      } catch (_) {
+        // Not the service's JSON error; report the status instead.
+      }
+      throw Exception(
+        error ?? 'Download failed (HTTP ${response.statusCode}).',
+      );
+    }
+    final name = RegExp(r'filename="([^"/\\]+)"')
+        .firstMatch(response.headers['content-disposition'] ?? '')
+        ?.group(1);
+    return (bytes: response.bodyBytes, name: name);
   }
 
   Uri _uri(String path) {

@@ -51,6 +51,7 @@ app.*.map.json
 backend/.access-token
 backend/profile.md
 backend/applied.json*
+cv/
 __pycache__/
 *.pyc
 .env

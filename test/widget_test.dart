@@ -260,6 +260,65 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('the CV button saves the PDF to Downloads and opens it', (
+    tester,
+  ) async {
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('fieldwork/files'),
+      (call) async {
+        calls.add(call);
+        return call.method == 'save'
+            ? {
+                'uri': 'content://media/external/downloads/7',
+                'name': 'Bogdan-Gherghina-CV.pdf',
+              }
+            : null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('fieldwork/files'),
+        null,
+      ),
+    );
+    final client = MockClient((r) async {
+      expect(r.headers['Authorization'], 'Bearer test-token');
+      if (r.url.path == '/cv') {
+        return http.Response.bytes(
+          [37, 80, 68, 70],
+          200,
+          headers: {
+            'content-disposition':
+                'attachment; filename="Bogdan-Gherghina-CV.pdf"',
+          },
+        );
+      }
+      return http.Response(jsonEncode({'jobs': []}), 200);
+    });
+    SharedPreferences.setMockInitialValues({'token': 'test-token'});
+    await tester.pumpWidget(JobsApp(httpClient: () => client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Download your CV'));
+    await tester.pumpAndSettle();
+    expect(calls.single.method, 'save');
+    expect(calls.single.arguments, {
+      'name': 'Bogdan-Gherghina-CV.pdf',
+      'mime': 'application/pdf',
+      'bytes': [37, 80, 68, 70],
+    });
+    expect(
+      find.text('Saved Bogdan-Gherghina-CV.pdf to Downloads.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(calls.last.method, 'open');
+    expect(calls.last.arguments, {
+      'uri': 'content://media/external/downloads/7',
+      'mime': 'application/pdf',
+    });
+  });
   testWidgets('applied roles are stored on the service and leave Discover', (
     tester,
   ) async {

@@ -1,6 +1,7 @@
 import copy
 import datetime
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -317,6 +318,27 @@ class ApiTests(unittest.TestCase):
             (Path(folder) / 'fieldwork.json').write_text('{"version_code": "soon"}')
             with urlopen(Request(self.url + '/app', headers=headers)) as r:
                 self.assertEqual(json.load(r), {'available': False})
+    def test_cv_download(self):
+        headers = {'Authorization': 'Bearer ' + self.token}
+        with tempfile.TemporaryDirectory() as folder, patch.object(s, 'CV_DIR', Path(folder)):
+            with self.assertRaises(HTTPError) as e:
+                urlopen(Request(self.url + '/cv', headers=headers))
+            self.assertEqual(e.exception.code, 404)
+            self.assertIn('cv folder', json.load(e.exception)['error'])
+            old, new = Path(folder) / 'Old CV.pdf', Path(folder) / 'Bogdan-Gherghina-CV.pdf'
+            old.write_bytes(b'%PDF-old')
+            new.write_bytes(b'%PDF-1.5 new')
+            (Path(folder) / 'notes.txt').write_text('not a CV')
+            os.utime(old, ns=(1, 1))
+            with urlopen(Request(self.url + '/cv', headers=headers)) as r:
+                self.assertEqual(r.headers['Content-Type'], 'application/pdf')
+                self.assertEqual(r.headers['Content-Disposition'], 'attachment; filename="Bogdan-Gherghina-CV.pdf"')
+                self.assertEqual(r.read(), b'%PDF-1.5 new')
+            with self.assertRaises(HTTPError) as e:
+                urlopen(self.url + '/cv')
+            self.assertEqual(e.exception.code, 401)
+        self.assertEqual(s.download_name(Path('Ștefan "CV".PDF')), 'Stefan -CV-.PDF')
+        self.assertEqual(s.download_name(Path('.pdf')), 'CV.pdf')
 
 if __name__ == '__main__':
     unittest.main()

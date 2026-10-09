@@ -12,7 +12,8 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.security.MessageDigest
 
-// Installs app updates downloaded from the job service, through Android's package installer.
+// Installs app updates downloaded from the job service, through Android's package installer,
+// and saves files such as the CV to Downloads.
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -46,6 +47,32 @@ class MainActivity : FlutterActivity() {
                 } catch (e: Exception) {
                     result.error("update", e.message ?: e.javaClass.simpleName, null)
                 }
+            }
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "fieldwork/files").setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "save" -> {
+                        val name = call.argument<String>("name")!!
+                        val mime = call.argument<String>("mime")!!
+                        val bytes = call.argument<ByteArray>("bytes")!!
+                        Thread {
+                            try {
+                                val saved = Downloads.save(this, name, mime, bytes)
+                                runOnUiThread { result.success(saved) }
+                            } catch (e: Exception) {
+                                runOnUiThread { result.error("files", e.message ?: e.javaClass.simpleName, null) }
+                            }
+                        }.start()
+                    }
+                    "open" -> {
+                        Downloads.open(this, call.argument<String>("uri")!!, call.argument<String>("mime")!!)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            } catch (e: Exception) {
+                result.error("files", e.message ?: e.javaClass.simpleName, null)
             }
         }
     }

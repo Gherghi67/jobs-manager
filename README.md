@@ -50,6 +50,15 @@ Tailscale Serve gives the Mac's service a private HTTPS address that only your o
 - `GET /app` reports the published build. `GET /app/fieldwork.apk` serves it. Both need the access token. The APK contains no credentials or tokens.
 - The installer's result goes to `InstallStatusReceiver`, which is not exported. Other apps cannot fake it. The receiver only acts on install sessions Fieldwork created. It only opens Android's own install confirmation (`CONFIRM_INSTALL`), with any file-access grants removed.
 
+## Your CV
+
+The document icon in the top bar, next to the options icon, saves your CV from the service to the phone's **Downloads** folder, so job application forms can attach it from there. The snackbar's **Open** shows it in the phone's PDF viewer.
+
+- The service serves the newest PDF in `cv/` at the repository root. Git ignores that folder because the CV carries your contact details. `JOBS_CV_DIR` points elsewhere. The file keeps its name on the phone, so name it the way recruiters should see it. On October 9, 2026, `Bogdan-Gherghina-CV.pdf` was moved there from `~/Documents/cv-refactor/`.
+- To update the CV, replace the PDF in `cv/`; no restart is needed. cv-refactor's `latex/build.sh` still writes its output to `~/Documents/cv-refactor/Bogdan-Gherghina-CV.pdf`, so copy a rebuilt CV into `cv/` yourself.
+- Saving again replaces the copy Fieldwork saved before rather than adding "CV (1).pdf". If another app already put a file with that name in Downloads, Android saves Fieldwork's copy under a numbered name, and the snackbar shows that name.
+- `GET /cv` returns the PDF with its file name and needs the access token. Saving uses Android's MediaStore, so it needs no storage permission. It requires Android 10 or newer; older phones get a message instead.
+
 ## Claude ranking
 
 With **Let Claude rank the top roles** on (the default), the service sends the top 40 keyword matches to Claude Code on the Mac after fetching. Claude Code runs headless (`claude -p`) under your Claude login, so it uses your Claude subscription, not an API key. Claude returns a 0–100 fit, apply/maybe/skip, its own reading of Romania eligibility, and short reasons and concerns. Ranked roles come first, ordered by verdict and fit. The rest follow in keyword order.
@@ -106,11 +115,12 @@ python3 -m unittest discover -s backend/tests -v   # never calls Claude; the AI 
 
 The backend tests include the original collector regression suite, preference/eligibility cases, caching, partial failures, and actual local HTTP authentication. HTTP tests need permission to open a localhost socket.
 
-The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
+The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
 
 ## Verification (October 9, 2026)
 
-- 131 Python tests and 19 Flutter tests passed; `flutter analyze` reported no issues.
+- 139 Python tests and 24 Flutter tests passed; `flutter analyze` reported no issues.
+- CV download, emulator (Android 14, build 29859312): `GET /cv` returned the 43,366-byte PDF locally and through the Tailscale address, and 401 without the token. The top-bar button saved `Bogdan-Gherghina-CV.pdf` to Downloads, byte-identical to `cv/`. **Open** showed it in the Drive PDF viewer. A second tap replaced the same file instead of adding a copy.
 - Applied jobs, live: on a separate service instance, a Remotive + Himalayas search returned 11 roles. After the first was marked as applied, the same search returned 10 with one left out, and after it was unmarked, 11 again. On the emulator (build 29859265), the check icon moved a role from Discover (79 → 78) to the Applied tab on the real service, and unmarking it there brought Discover back to 79 and emptied the service's list. Both `GET` and `DELETE /applied` also worked through the Tailscale address.
 - In-app update, emulator: build 29859242 reported "You have the latest build". After build 29859244 was published, the button offered it and opened the "Install unknown apps" setting once. It then downloaded and verified the build and showed Android's update dialog. After confirming, the device reported versionCode 29859244, and saved results and options were intact. After moving install results to the non-exported receiver, a second pass updated 29859248 → 29859249 the same way, with no logcat crashes or blocked activity launches.
 - Claude ranking, live: a default search through the Tailscale address fetched 1,794 listings from nine sources in about 100 seconds. Opus then ranked the top 40 in about 50 seconds on the subscription login, and 79 roles were returned. An emulator search with the same options reused the cached verdicts and finished in 15 seconds. It showed the Claude pills, the top reason on each card, Claude's take in the details sheet and the status line, with no logcat errors.

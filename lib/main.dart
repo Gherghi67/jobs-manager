@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
+import 'downloads.dart';
 import 'models.dart';
 import 'updater.dart';
 
@@ -76,7 +77,7 @@ class _JobsHomeState extends State<JobsHome> {
       updated = '',
       filter = '';
   String? error, appliedNote;
-  bool loading = true, busy = false, cached = false;
+  bool loading = true, busy = false, cached = false, savingCv = false;
   int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
   int appliedVersion = 0;
   JobsApi? activeApi;
@@ -421,6 +422,47 @@ class _JobsHomeState extends State<JobsHome> {
         (a) => a['scope'] == 'company' && (a['match'] ?? 'company') == match,
       );
 
+  // Saves the CV from the service to Downloads, ready to attach to applications.
+  Future<void> downloadCv() async {
+    setState(() {
+      savingCv = true;
+    });
+    notify('Downloading your CV…');
+    final api = this.api();
+    try {
+      final cv = await api.file('/cv');
+      final saved = await Downloads.save(cv.name ?? 'CV.pdf', cv.bytes);
+      notify(
+        'Saved ${saved.name} to Downloads.',
+        action: SnackBarAction(
+          label: 'Open',
+          onPressed: () => unawaited(openCv(saved.uri)),
+        ),
+      );
+    } on MissingPluginException {
+      notify('Saving files works in the Android app only.');
+    } on PlatformException catch (e) {
+      notify(e.message ?? 'The CV could not be saved.');
+    } catch (e) {
+      notify(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          savingCv = false;
+        });
+      }
+    }
+  }
+
+  Future<void> openCv(String uri) async {
+    try {
+      await Downloads.open(uri);
+    } on PlatformException catch (e) {
+      notify(e.message ?? 'Could not open the CV.');
+    }
+  }
+
   Future<void> openLink(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !['https', 'http'].contains(uri.scheme)) {
@@ -594,13 +636,26 @@ class _JobsHomeState extends State<JobsHome> {
           children: [
             Icon(Icons.work_outline_rounded, color: accent),
             SizedBox(width: 10),
-            Text(
-              'fieldwork',
-              style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -1),
+            // Shrinks rather than overflows next to the actions on narrow phones.
+            Flexible(
+              child: Text(
+                'fieldwork',
+                overflow: TextOverflow.fade,
+                softWrap: false,
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -1,
+                ),
+              ),
             ),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Download your CV',
+            onPressed: savingCv ? null : downloadCv,
+            icon: const Icon(Icons.description_outlined),
+          ),
           IconButton(
             tooltip: 'Search options',
             onPressed: busy || loading ? null : editOptions,
