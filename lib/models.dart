@@ -75,6 +75,13 @@ String aiSummary(Map<String, dynamic> status) {
   return note.isEmpty ? line : '$line $note';
 }
 
+String appliedLabel(String isoDate) {
+  final date = DateTime.tryParse(isoDate)?.toLocal();
+  return date == null
+      ? 'Applied'
+      : 'Applied ${date.toString().split(' ').first}';
+}
+
 class Job {
   final Map<String, dynamic> data;
   Job(this.data);
@@ -84,6 +91,8 @@ class Job {
       List<String>.from(data['sources'] ?? [data['source']]);
   List<String> get matches => List<String>.from(data['matched']?['core'] ?? []);
   bool get eligible => ['worldwide', 'europe'].contains(text('eligibility'));
+  // An entry from an application email: it covers every role at the company.
+  bool get companyWide => data['scope'] == 'company';
   Map<String, dynamic>? get ai =>
       data['ai'] is Map ? Map<String, dynamic>.from(data['ai'] as Map) : null;
   List<String> aiList(String key) => List<String>.from(ai?[key] ?? []);

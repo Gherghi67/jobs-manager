@@ -62,6 +62,16 @@ With **Let Claude rank the top roles** on (the default), the service sends the t
 - If Claude fails (not installed, signed out, usage limit, timeout), the search still completes with keyword ranking, and the app says why.
 - Your profile and the listings are sent to Anthropic, as in any Claude conversation. Claude's eligibility reading comes from listing text, like the keyword labels; confirm with the employer.
 
+## Applied jobs
+
+Tap the check icon on a card, or **Mark as applied** in a role's details, once you have applied. The service records the role in `backend/applied.json`, which git ignores, and every later search leaves it out before Claude ranks anything. Claude therefore never scores or shows it again. The **Applied** tab lists what you marked, newest first, with the date. Tap the filled check, or **Mark as not applied** in the details, to undo.
+
+- A new listing counts as already applied when it has the same listing id, the same URL, or the same company and job title, on any board and in any location. Discover shows "Left out N roles you already applied to." after a search.
+- Marking a role as applied removes it from Saved and Dismissed. Marking needs the service; the phone keeps a copy of the list so the Applied tab still shows it offline.
+- The service stores each role's listing details, Claude's take, and up to 6,000 characters of its description, so you can still read it after the posting is taken down. The file is readable only by your user (0600). Set `JOBS_APPLIED_FILE` to keep it elsewhere.
+- Company entries hide every role at one company, whatever the title. Post `{"scope": "company", "company": "…", "title": "…", "applied_at": "<ISO date>", "note": "…"}` to `/applied`. Company names are compared without case, punctuation or legal suffixes, so "Proxify AB" matches "Proxify". The Applied tab shows them as "Every role at this company". On October 9, 2026, the 15 companies from the application confirmations in the personal Gmail (October 2–9) were imported this way.
+- `GET /applied` lists them, `POST /applied` adds a role, and `DELETE /applied/<id>` removes one. All three need the access token.
+
 ## Options and behavior
 
 - Defaults from your October 9 cv-refactor preferences: fully remote, Romania/Europe/worldwide eligibility, contracts first, backend/AI/Python/Go focus.
@@ -72,7 +82,7 @@ With **Let Claude rank the top roles** on (the default), the service sends the t
 - Eligibility is inferred from source location fields and selected explicit restrictions, not verified work authorization. Explicit country lists take priority; timezone compatibility alone does not establish Romania eligibility. Confirm restrictions in the original posting.
 - Matching uses the reference's weighted keyword rules, excludes unsuitable titles, and explains matched core skills. Scores are points, not percentages or model confidence. No Jev calls or automatic applications are made.
 - Deduplication combines equal company/title/location records and retains source attribution. Different location variants remain separate.
-- Source failures are shown individually. If all fail, the app keeps its previous results. Successful empty searches replace old results. Saved jobs persist independently of search results; dismissing a job removes it from Saved. Restore returns it to Discover.
+- Source failures are shown individually. If all fail, the app keeps its previous results. Successful empty searches replace old results. Saved jobs persist independently of search results; dismissing a job removes it from Saved. Restore returns it to Discover. Applied jobs are stored on the service (see above).
 - Sources are cached in service memory for one hour to reduce repeated calls; cache clears on service restart. One search runs at a time. Adzuna uses one page per query/country, Himalayas one page per type for up to three queries, and Arbeitnow two pages. This is a bounded search, not exhaustive coverage.
 - Searches can take several minutes. The app polls source status. Leaving Options unchanged and retrying while the service is still searching rejoins that run. The service continues if the phone closes; it does not schedule recurring searches.
 - App data stays in private Android storage with backup disabled. Service tokens are stored in that private app storage. The service holds fetched listings in memory. No analytics are included.
@@ -95,7 +105,8 @@ The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`
 
 ## Verification (October 9, 2026)
 
-- 123 Python tests and 16 Flutter tests passed; `flutter analyze` reported no issues.
+- 131 Python tests and 19 Flutter tests passed; `flutter analyze` reported no issues.
+- Applied jobs, live: on a separate service instance, a Remotive + Himalayas search returned 11 roles. After the first was marked as applied, the same search returned 10 with one left out, and after it was unmarked, 11 again. On the emulator (build 29859265), the check icon moved a role from Discover (79 → 78) to the Applied tab on the real service, and unmarking it there brought Discover back to 79 and emptied the service's list. Both `GET` and `DELETE /applied` also worked through the Tailscale address.
 - In-app update, emulator: build 29859242 reported "You have the latest build". After build 29859244 was published, the button offered it and opened the "Install unknown apps" setting once. It then downloaded and verified the build and showed Android's update dialog. After confirming, the device reported versionCode 29859244, and saved results and options were intact. After moving install results to the non-exported receiver, a second pass updated 29859248 → 29859249 the same way, with no logcat crashes or blocked activity launches.
 - Claude ranking, live: a default search through the Tailscale address fetched 1,794 listings from nine sources in about 100 seconds. Opus then ranked the top 40 in about 50 seconds on the subscription login, and 79 roles were returned. An emulator search with the same options reused the cached verdicts and finished in 15 seconds. It showed the Claude pills, the top reason on each card, Claude's take in the details sheet and the status line, with no logcat errors.
 - Live Adzuna verification fetched 50 listings. Remotive and Himalayas fetched 63 combined.

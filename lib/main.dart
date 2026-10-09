@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -17,7 +18,9 @@ const accent = Color(0xFF146B57);
 const paper = Color(0xFFF5F5EF);
 
 class JobsApp extends StatelessWidget {
-  const JobsApp({super.key});
+  // Tests pass a fake HTTP client; the app uses a real one.
+  final http.Client Function()? httpClient;
+  const JobsApp({super.key, this.httpClient});
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Fieldwork · Jobs',
@@ -46,12 +49,13 @@ class JobsApp extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
       ),
     ),
-    home: const JobsHome(),
+    home: JobsHome(httpClient: httpClient),
   );
 }
 
 class JobsHome extends StatefulWidget {
-  const JobsHome({super.key});
+  final http.Client Function()? httpClient;
+  const JobsHome({super.key, this.httpClient});
   @override
   State<JobsHome> createState() => _JobsHomeState();
 }
@@ -61,7 +65,9 @@ class _JobsHomeState extends State<JobsHome> {
   Map<String, dynamic> options = defaultOptions();
   List<Job> jobs = [];
   Map<String, dynamic> saved = {};
-  Set<String> dismissed = {};
+  // A copy of the applied list kept on the service, for offline viewing.
+  Map<String, dynamic> applied = {};
+  Set<String> dismissed = {}, applying = {};
   List<dynamic> sources = [];
   Map<String, dynamic>? aiStatus;
   String baseUrl = 'http://127.0.0.1:8765',
@@ -69,9 +75,10 @@ class _JobsHomeState extends State<JobsHome> {
       status = '',
       updated = '',
       filter = '';
-  String? error;
+  String? error, appliedNote;
   bool loading = true, busy = false, cached = false;
-  int tab = 0, generation = 0, sourceTotal = 0;
+  int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
+  int appliedVersion = 0;
   JobsApi? activeApi;
 
   @override
@@ -101,6 +108,10 @@ class _JobsHomeState extends State<JobsHome> {
         jsonDecode(p.getString('saved') ?? '{}'),
       );
       dismissed = (p.getStringList('dismissed') ?? []).toSet();
+      applied = Map<String, dynamic>.from(
+        jsonDecode(p.getString('applied') ?? '{}'),
+      );
+      appliedHidden = p.getInt('applied_hidden') ?? 0;
       jobs = (jsonDecode(p.getString('jobs') ?? '[]') as List)
           .map((j) => Job(Map<String, dynamic>.from(j)))
           .toList();
@@ -118,7 +129,10 @@ class _JobsHomeState extends State<JobsHome> {
       token = p.getString('token') ?? '';
       updated = p.getString('updated') ?? '';
     });
+    unawaited(syncApplied());
   }
+
+  JobsApi api() => JobsApi(baseUrl, token, client: widget.httpClient?.call());
 
   // A search reports each source when it finishes, so mid-search (or after an
   // interrupted one) the run's planned total is larger than the list.
@@ -133,6 +147,8 @@ class _JobsHomeState extends State<JobsHome> {
     await p.setString('options', jsonEncode(options));
     await p.setString('saved', jsonEncode(saved));
     await p.setStringList('dismissed', dismissed.toList());
+    await p.setString('applied', jsonEncode(applied));
+    await p.setInt('applied_hidden', appliedHidden);
     await p.setString('jobs', jsonEncode(jobs.map((j) => j.data).toList()));
     await p.setString('sources', jsonEncode(sources));
     await p.setString('ai', jsonEncode(aiStatus));
@@ -150,7 +166,7 @@ class _JobsHomeState extends State<JobsHome> {
       return;
     }
     final run = ++generation;
-    final api = JobsApi(baseUrl, token);
+    final api = this.api();
     activeApi = api;
     setState(() {
       busy = true;
@@ -191,6 +207,7 @@ class _JobsHomeState extends State<JobsHome> {
             updated = result['updated_at'] as String;
             final ai = result['ai'];
             aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
+            appliedHidden = (result['applied_hidden'] as num?)?.toInt() ?? 0;
             cached = false;
           });
           await persist();
@@ -237,6 +254,7 @@ class _JobsHomeState extends State<JobsHome> {
         token = result['token'];
       });
       await persist();
+      unawaited(syncApplied());
     }
   }
 
@@ -250,6 +268,115 @@ class _JobsHomeState extends State<JobsHome> {
       }
     });
     unawaited(persist());
+  }
+
+  void notify(String text, {SnackBarAction? action}) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), action: action));
+  }
+
+  // The applied list lives on the service, which leaves those roles out of
+  // every search before Claude ranks them.
+  Future<void> syncApplied() async {
+    if (token.isEmpty) {
+      return;
+    }
+    final version = appliedVersion;
+    final api = this.api();
+    try {
+      final result = await api.request('/applied');
+      // A change made while this request was in flight is newer.
+      if (!mounted || version != appliedVersion) {
+        return;
+      }
+      setState(() {
+        applied = {
+          for (final j in result['jobs'] as List)
+            (j as Map)['id'] as String: Map<String, dynamic>.from(j),
+        };
+        appliedNote = null;
+      });
+      await persist();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          appliedNote =
+              'Showing the copy on this phone. ${e.toString().replaceFirst('Exception: ', '')}';
+        });
+      }
+    } finally {
+      api.close();
+    }
+  }
+
+  Future<void> toggleApplied(Job j) async {
+    if (applying.contains(j.id)) {
+      return;
+    }
+    if (token.isEmpty) {
+      notify('Connect your job service in Options to track applications.');
+      return;
+    }
+    final undo = applied.containsKey(j.id);
+    final description = j.text('description');
+    final api = this.api();
+    setState(() {
+      applying.add(j.id);
+    });
+    try {
+      final result = undo
+          ? await api.request(
+              '/applied/${Uri.encodeComponent(j.id)}',
+              delete: true,
+            )
+          : await api.request(
+              '/applied',
+              body: {
+                ...j.data,
+                'description': description.length > 6000
+                    ? description.substring(0, 6000)
+                    : description,
+              },
+            );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        appliedVersion++;
+        if (undo) {
+          applied.remove(j.id);
+        } else {
+          applied[j.id] = Map<String, dynamic>.from(result['job'] as Map);
+          saved.remove(j.id);
+          dismissed.remove(j.id);
+        }
+      });
+      unawaited(persist());
+      notify(
+        undo
+            ? 'Removed from Applied.'
+            : 'Marked as applied. Future searches will leave it out.',
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () => unawaited(toggleApplied(j)),
+        ),
+      );
+    } catch (e) {
+      notify(
+        'Could not update Applied. ${e.toString().replaceFirst('Exception: ', '')}',
+      );
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          applying.remove(j.id);
+        });
+      }
+    }
   }
 
   Future<void> openLink(String url) async {
@@ -339,6 +466,30 @@ class _JobsHomeState extends State<JobsHome> {
               label: const Text('Open original listing'),
             ),
             const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                unawaited(toggleApplied(j));
+              },
+              icon: Icon(
+                applied.containsKey(j.id)
+                    ? Icons.undo
+                    : Icons.check_circle_outline,
+              ),
+              label: Text(
+                applied.containsKey(j.id)
+                    ? 'Mark as not applied'
+                    : 'Mark as applied',
+              ),
+            ),
+            if (applied.containsKey(j.id))
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '${appliedLabel((applied[j.id] as Map)['applied_at'].toString())}. Searches leave this role out.',
+                ),
+              ),
+            const SizedBox(height: 12),
             Text(
               'Jobs by ${j.sources.map(sourceName).join(', ')} · ${j.text('posted')}',
             ),
@@ -350,16 +501,30 @@ class _JobsHomeState extends State<JobsHome> {
 
   @override
   Widget build(BuildContext context) {
-    final pool = tab == 1
-        ? saved.values.map((j) => Job(Map<String, dynamic>.from(j))).toList()
-        : jobs;
+    final pool = switch (tab) {
+      1 => saved.values.map((j) => Job(Map<String, dynamic>.from(j))).toList(),
+      2 =>
+        applied.values.map((j) => Job(Map<String, dynamic>.from(j))).toList()
+          ..sort(
+            (a, b) => b.text('applied_at').compareTo(a.text('applied_at')),
+          ),
+      _ => jobs,
+    };
+    final appliedCompanies = {
+      for (final a in applied.values)
+        if ((a as Map)['scope'] == 'company') a['company_key'],
+    };
     final visible = pool
         .where(
           (j) =>
-              (tab == 1 ||
-                  (tab == 2
-                      ? dismissed.contains(j.id)
-                      : !dismissed.contains(j.id))) &&
+              switch (tab) {
+                0 =>
+                  !dismissed.contains(j.id) &&
+                      !applied.containsKey(j.id) &&
+                      !appliedCompanies.contains(j.data['company_key']),
+                3 => dismissed.contains(j.id),
+                _ => true,
+              } &&
               '${j.text('title')} ${j.text('company')} ${j.text('description')}'
                   .toLowerCase()
                   .contains(filter.toLowerCase()),
@@ -388,9 +553,14 @@ class _JobsHomeState extends State<JobsHome> {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
-        onDestinationSelected: (v) => setState(() {
-          tab = v;
-        }),
+        onDestinationSelected: (v) {
+          setState(() {
+            tab = v;
+          });
+          if (v == 2) {
+            unawaited(syncApplied());
+          }
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.explore_outlined),
@@ -402,23 +572,29 @@ class _JobsHomeState extends State<JobsHome> {
             selectedIcon: Icon(Icons.bookmark),
             label: 'Saved',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.check_circle_outline),
+            selectedIcon: Icon(Icons.check_circle),
+            label: 'Applied',
+          ),
           NavigationDestination(icon: Icon(Icons.history), label: 'Dismissed'),
         ],
       ),
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
-              onRefresh: search,
+              onRefresh: tab == 2 ? syncApplied : search,
               child: ListView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
                 children: [
                   Text(
-                    tab == 0
-                        ? 'Your next chapter.'
-                        : tab == 1
-                        ? 'Worth a closer look.'
-                        : 'Off your shortlist.',
+                    switch (tab) {
+                      0 => 'Your next chapter.',
+                      1 => 'Worth a closer look.',
+                      2 => 'Already applied.',
+                      _ => 'Off your shortlist.',
+                    },
                     style: const TextStyle(
                       fontSize: 32,
                       fontWeight: FontWeight.w800,
@@ -428,11 +604,13 @@ class _JobsHomeState extends State<JobsHome> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    tab == 0
-                        ? 'Good work, on your terms.'
-                        : tab == 1
-                        ? 'Your saved roles stay here, even offline.'
-                        : 'Restore a role whenever you change your mind.',
+                    switch (tab) {
+                      0 => 'Good work, on your terms.',
+                      1 => 'Your saved roles stay here, even offline.',
+                      2 =>
+                        'Kept on your service, so searches skip these roles.',
+                      _ => 'Restore a role whenever you change your mind.',
+                    },
                     style: const TextStyle(
                       color: Color(0xFF63716D),
                       fontSize: 15,
@@ -585,6 +763,14 @@ class _JobsHomeState extends State<JobsHome> {
                       ),
                     const SizedBox(height: 20),
                   ],
+                  if (tab == 2 && appliedNote != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Text(
+                        appliedNote!,
+                        style: TextStyle(color: Colors.orange.shade900),
+                      ),
+                    ),
                   TextField(
                     onChanged: (v) => setState(() {
                       filter = v;
@@ -599,7 +785,8 @@ class _JobsHomeState extends State<JobsHome> {
                     children: [
                       Text(switch (tab) {
                         1 => plural(visible.length, 'saved role'),
-                        2 => plural(visible.length, 'dismissed role'),
+                        2 => plural(visible.length, 'applied role'),
+                        3 => plural(visible.length, 'dismissed role'),
                         _ => plural(
                           visible.length,
                           'opportunity',
@@ -607,11 +794,22 @@ class _JobsHomeState extends State<JobsHome> {
                         ),
                       }, style: const TextStyle(fontWeight: FontWeight.bold)),
                       const Spacer(),
-                      if (cached)
+                      if (cached && tab != 2)
                         const Text('Cached', style: TextStyle(color: accent)),
                     ],
                   ),
-                  if (updated.isNotEmpty)
+                  if (tab == 0 && appliedHidden > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        'Left out ${plural(appliedHidden, 'role')} you already applied to.',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ),
+                  if (updated.isNotEmpty && tab != 2)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
                       child: Text(
@@ -629,21 +827,25 @@ class _JobsHomeState extends State<JobsHome> {
                       child: Column(
                         children: [
                           Icon(
-                            tab == 1
-                                ? Icons.bookmarks_outlined
-                                : Icons.travel_explore,
+                            switch (tab) {
+                              1 => Icons.bookmarks_outlined,
+                              2 => Icons.check_circle_outline,
+                              _ => Icons.travel_explore,
+                            },
                             size: 48,
                             color: accent,
                           ),
                           const SizedBox(height: 16),
                           Text(
-                            tab == 1
-                                ? 'Keep the roles that catch your eye.'
-                                : tab == 2
-                                ? 'Nothing dismissed.'
-                                : jobs.isEmpty && updated.isEmpty
-                                ? 'A fresh start for your job search.'
-                                : 'No roles match this view.',
+                            switch (tab) {
+                              1 => 'Keep the roles that catch your eye.',
+                              2 => 'No applications marked yet.',
+                              3 => 'Nothing dismissed.',
+                              _ =>
+                                jobs.isEmpty && updated.isEmpty
+                                    ? 'A fresh start for your job search.'
+                                    : 'No roles match this view.',
+                            },
                             style: const TextStyle(
                               fontSize: 17,
                               fontWeight: FontWeight.w600,
@@ -651,12 +853,11 @@ class _JobsHomeState extends State<JobsHome> {
                             textAlign: TextAlign.center,
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            tab == 0
-                                ? 'Choose your options, then fetch from your sources.'
-                                : 'Your choices are stored only on this device.',
-                            textAlign: TextAlign.center,
-                          ),
+                          Text(switch (tab) {
+                            0 => 'Choose your options, then fetch from your sources.',
+                            2 => 'Mark a role as applied and future searches will leave it out.',
+                            _ => 'Your choices are stored only on this device.',
+                          }, textAlign: TextAlign.center),
                         ],
                       ),
                     ),
@@ -666,7 +867,7 @@ class _JobsHomeState extends State<JobsHome> {
                       child: Card(
                         child: InkWell(
                           borderRadius: BorderRadius.circular(22),
-                          onTap: () => detail(j),
+                          onTap: j.companyWide ? null : () => detail(j),
                           child: Padding(
                             padding: const EdgeInsets.all(18),
                             child: Column(
@@ -683,103 +884,136 @@ class _JobsHomeState extends State<JobsHome> {
                                         ),
                                       ),
                                     ),
+                                    if (tab != 2)
+                                      IconButton(
+                                        tooltip: saved.containsKey(j.id)
+                                            ? 'Unsave job'
+                                            : 'Save job',
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: () => toggleSaved(j),
+                                        icon: Icon(
+                                          saved.containsKey(j.id)
+                                              ? Icons.bookmark
+                                              : Icons.bookmark_border,
+                                          color: accent,
+                                        ),
+                                      ),
                                     IconButton(
-                                      tooltip: saved.containsKey(j.id)
-                                          ? 'Unsave job'
-                                          : 'Save job',
+                                      tooltip: applied.containsKey(j.id)
+                                          ? 'Mark as not applied'
+                                          : 'Mark as applied',
                                       visualDensity: VisualDensity.compact,
-                                      onPressed: () => toggleSaved(j),
+                                      onPressed: applying.contains(j.id)
+                                          ? null
+                                          : () => toggleApplied(j),
                                       icon: Icon(
-                                        saved.containsKey(j.id)
-                                            ? Icons.bookmark
-                                            : Icons.bookmark_border,
+                                        applied.containsKey(j.id)
+                                            ? Icons.check_circle
+                                            : Icons.check_circle_outline,
                                         color: accent,
                                       ),
                                     ),
                                   ],
                                 ),
                                 Text(
-                                  j.text('title'),
+                                  j.companyWide && j.text('title').isEmpty
+                                      ? 'Every role at this company'
+                                      : j.text('title'),
                                   style: const TextStyle(
                                     fontSize: 20,
                                     fontWeight: FontWeight.w700,
                                     color: ink,
                                   ),
                                 ),
-                                const SizedBox(height: 10),
-                                Text(
-                                  j.text('location'),
-                                  style: const TextStyle(color: Colors.black54),
-                                ),
-                                const SizedBox(height: 12),
-                                Wrap(
-                                  spacing: 6,
-                                  runSpacing: 6,
-                                  children: [
-                                    if (j.ai != null)
+                                if (j.companyWide) ...[
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    j.text('note'),
+                                    style: const TextStyle(
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                ] else ...[
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    j.text('location'),
+                                    style: const TextStyle(
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 6,
+                                    children: [
+                                      if (j.ai != null)
+                                        pill(
+                                          'Claude ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
+                                          j.ai!['verdict'] == 'apply',
+                                        ),
                                       pill(
-                                        'Claude ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
-                                        j.ai!['verdict'] == 'apply',
+                                        eligibilityLabel(j.text('eligibility')),
+                                        j.eligible,
                                       ),
-                                    pill(
-                                      eligibilityLabel(j.text('eligibility')),
-                                      j.eligible,
-                                    ),
-                                    pill(j.text('type'), false),
-                                    ...j.matches
-                                        .take(3)
-                                        .map((m) => pill(m, false)),
-                                  ],
-                                ),
-                                if (j.aiList('reasons').isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 10),
-                                    child: Text(
-                                      j.aiList('reasons').first,
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        color: Color(0xFF3F4F4B),
-                                      ),
-                                    ),
+                                      pill(j.text('type'), false),
+                                      ...j.matches
+                                          .take(3)
+                                          .map((m) => pill(m, false)),
+                                    ],
                                   ),
-                                if (j.text('salary').isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 12),
-                                    child: Text(
-                                      j.text('salary'),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
+                                  if (j.aiList('reasons').isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 10),
+                                      child: Text(
+                                        j.aiList('reasons').first,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: Color(0xFF3F4F4B),
+                                        ),
                                       ),
                                     ),
-                                  ),
+                                  if (j.text('salary').isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 12),
+                                      child: Text(
+                                        j.text('salary'),
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                ],
                                 const SizedBox(height: 14),
                                 Row(
                                   children: [
                                     Expanded(
                                       child: Text(
-                                        'Jobs by ${j.sources.map(sourceName).join(', ')}',
+                                        j.companyWide
+                                            ? '${appliedLabel(j.text('applied_at'))} · From your email · Searches hide every role here'
+                                            : '${tab == 2 ? '${appliedLabel(j.text('applied_at'))} · ' : ''}Jobs by ${j.sources.map(sourceName).join(', ')}',
                                         style: const TextStyle(
                                           fontSize: 11,
                                           color: Colors.black54,
                                         ),
                                       ),
                                     ),
-                                    TextButton(
-                                      onPressed: () {
-                                        setState(() {
-                                          if (dismissed.contains(j.id)) {
-                                            dismissed.remove(j.id);
-                                          } else {
-                                            dismissed.add(j.id);
-                                            saved.remove(j.id);
-                                          }
-                                        });
-                                        unawaited(persist());
-                                      },
-                                      child: Text(
-                                        tab == 2 ? 'Restore' : 'Dismiss',
+                                    if (tab != 2)
+                                      TextButton(
+                                        onPressed: () {
+                                          setState(() {
+                                            if (dismissed.contains(j.id)) {
+                                              dismissed.remove(j.id);
+                                            } else {
+                                              dismissed.add(j.id);
+                                              saved.remove(j.id);
+                                            }
+                                          });
+                                          unawaited(persist());
+                                        },
+                                        child: Text(
+                                          tab == 3 ? 'Restore' : 'Dismiss',
+                                        ),
                                       ),
-                                    ),
                                   ],
                                 ),
                               ],
@@ -1291,7 +1525,7 @@ class _OptionsPageState extends State<OptionsPage> {
           ),
         const SizedBox(height: 12),
         const Text(
-          'Saved jobs, dismissed jobs, options, and cached results stay on this device. No applications are submitted automatically.',
+          'Saved jobs, dismissed jobs, options, and cached results stay on this device. Jobs you mark as applied are kept on your service, so searches leave them out. No applications are submitted automatically.',
           style: TextStyle(fontSize: 12, color: Colors.black54),
         ),
       ],

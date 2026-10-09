@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT.parent / 'artifacts'
+APPLIED_FILE = Path(os.environ.get('JOBS_APPLIED_FILE') or ROOT / 'applied.json')
 sys.path.insert(0, str(ROOT / 'vendor'))
 import adzuna_search as az
 import remote_search as remote
@@ -128,7 +129,7 @@ def rank(raw, o):
         item['type'] = remote.employment(item)
         if o['contract_only'] and item['type'] != 'contract':
             continue
-        item.update(score=score, matched=matched, sources=[item['source']])
+        item.update(score=score, matched=matched, sources=[item['source']], company_key=company_key(item['company']))
         # Keep distinct location variants: country-restricted copies are not equivalent.
         identity = remote.dedupe_key(item) + '|' + item['location'].lower()
         item['id'] = hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -145,12 +146,135 @@ def rank(raw, o):
     return rows
 
 
+APPLIED_FIELDS = ('id', 'title', 'company', 'url', 'location', 'type', 'salary', 'posted', 'source', 'sources',
+                  'eligibility', 'remote', 'score', 'matched', 'ai', 'description')
+
+
+class StoreError(Exception):
+    pass
+
+
+LEGAL_SUFFIXES = {'inc', 'llc', 'ltd', 'limited', 'gmbh', 'ag', 'ab', 'bv', 'nv', 'srl', 'sa', 'sas', 'sarl', 'spa',
+                  'plc', 'corp', 'corporation', 'co', 'oy', 'as', 'aps', 'pty', 'kg', 'ou', 'sp', 'z', 'oo'}
+
+
+def company_key(name):
+    """Company name without case, punctuation or legal suffixes, so "Proxify AB" matches "Proxify"."""
+    words = re.sub(r'[^a-z0-9]+', ' ', str(name or '').lower().replace('.', '')).split()
+    while len(words) > 1 and words[-1] in LEGAL_SUFFIXES:
+        words.pop()
+    return ' '.join(words)
+
+
+def applied_keys(job):
+    """A role counts as applied by listing id, by URL, or by company and title across boards and locations.
+    A company entry (from an application email) covers every role at that company."""
+    if job.get('scope') == 'company':
+        return {'company:' + company_key(job.get('company'))}
+    keys = {'id:' + str(job.get('id', ''))}
+    url = re.sub(r'^https?://(?:www\.)?', '', str(job.get('url', '')).split('#')[0].strip().lower()).rstrip('/')
+    if url:
+        keys.add('url:' + url)
+    if str(job.get('company') or '').strip() and str(job.get('title') or '').strip():
+        keys.add('role:' + remote.dedupe_key(job))
+    return keys
+
+
+class AppliedStore:
+    """Jobs the user marked as applied, kept on the service so every search leaves them out."""
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.jobs = None
+
+    def load(self):
+        if self.jobs is None:
+            try:
+                rows = json.loads(self.path.read_text())['jobs']
+            except FileNotFoundError:
+                rows = []
+            except (OSError, ValueError, KeyError, TypeError):
+                # Never overwrite a file we could not read: it holds the user's application history.
+                raise StoreError(f'{self.path.name} on the service could not be read.')
+            self.jobs = {j['id']: j for j in rows if isinstance(j, dict) and isinstance(j.get('id'), str)}
+        return self.jobs
+
+    def save(self):
+        temp = self.path.with_name(self.path.name + '.tmp')
+        with os.fdopen(os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), 'w') as f:
+            json.dump({'jobs': list(self.jobs.values())}, f, indent=1)
+        os.replace(temp, self.path)
+
+    def list(self):
+        with self.lock:
+            return sorted(copy.deepcopy(list(self.load().values())), key=lambda j: j.get('applied_at', ''), reverse=True)
+
+    def add(self, job):
+        if not isinstance(job, dict):
+            raise ValueError('Job must be an object.')
+        if job.get('scope') == 'company':
+            return self.add_company(job)
+        record = {k: copy.deepcopy(job[k]) for k in APPLIED_FIELDS if k in job}
+        if not all(isinstance(record.get(k), str) and record[k].strip() for k in ('id', 'title', 'url')):
+            raise ValueError('Job needs an id, title and url.')
+        if len(record['id']) > 64 or not record['url'].startswith(('https://', 'http://')) or not isinstance(record.get('company', ''), str):
+            raise ValueError('Invalid job.')
+        record['description'] = str(record.get('description') or '')[:6000]
+        record['applied_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+        with self.lock:
+            jobs = self.load()
+            if record['id'] not in jobs:
+                jobs[record['id']] = record
+                self.save()
+            return copy.deepcopy(jobs[record['id']])
+
+    def add_company(self, entry):
+        company = entry.get('company')
+        if not isinstance(company, str) or len(company) > 200 or not company_key(company):
+            raise ValueError('A company entry needs a company name.')
+        applied_at = entry.get('applied_at') or dt.datetime.now(dt.timezone.utc).isoformat()
+        dt.datetime.fromisoformat(str(applied_at))  # ValueError for a malformed date
+        key = company_key(company)
+        record = dict(id='company-' + hashlib.sha256(key.encode()).hexdigest()[:20], scope='company', company=company.strip(),
+                      company_key=key, title=str(entry.get('title') or '')[:300], source=str(entry.get('source') or 'email')[:40],
+                      note=str(entry.get('note') or '')[:500], applied_at=str(applied_at))
+        with self.lock:
+            jobs = self.load()
+            existing = jobs.get(record['id'])
+            if existing is None:
+                jobs[record['id']] = record
+            elif record['title'] and record['title'] not in existing['title']:
+                # Another role at a company already on the list.
+                existing['title'] = '; '.join(x for x in (existing['title'], record['title']) if x)[:300]
+            else:
+                return copy.deepcopy(existing)
+            self.save()
+            return copy.deepcopy(jobs[record['id']])
+
+    def remove(self, job_id):
+        with self.lock:
+            jobs = self.load()
+            if job_id not in jobs:
+                return False
+            del jobs[job_id]
+            self.save()
+            return True
+
+    def exclude(self, jobs):
+        """Drops roles the user already applied to. Returns (kept, hidden count)."""
+        with self.lock:
+            keys = set().union(*(applied_keys(j) for j in self.load().values()))
+        kept = [j for j in jobs if not (applied_keys(j) | ({'company:' + j['company_key']} if j.get('company_key') else set())) & keys]
+        return kept, len(jobs) - len(kept)
+
+
 class Engine:
-    def __init__(self):
+    def __init__(self, applied=None):
         self.lock = threading.Lock()
         self.runs = {}
         self.cache = {}
         self.ai_cache = {}
+        self.applied = applied or AppliedStore(APPLIED_FILE)
 
     def start(self, options):
         o = validate_options(options)
@@ -161,7 +285,7 @@ class Engine:
                         return key
                     raise RuntimeError('A search is already running. Wait for it to finish.')
             run_id = secrets.token_hex(12)
-            self.runs = {run_id: dict(status='running', options=o, jobs=[], sources=[], current='Starting search', fetched=0)}
+            self.runs = {run_id: dict(status='running', options=o, jobs=[], sources=[], current='Starting search', fetched=0, applied_hidden=0)}
         threading.Thread(target=self.run, args=(run_id, o), daemon=True).start()
         return run_id
 
@@ -247,8 +371,9 @@ class Engine:
                     # Never expose upstream URLs that could contain API keys.
                     message = str(exc) if name == 'adzuna' and isinstance(exc, ValueError) else f'{type(exc).__name__}: source unavailable; other sources continue.'
                     statuses.append(dict(name=name, status='error', count=0, cached=False, message=message))
-                jobs = rank(raw, o)
-                self.update(key, jobs=jobs, sources=copy.deepcopy(statuses), fetched=len(raw))
+                # Applied roles go before Claude's step, so they are never ranked or shown again.
+                jobs, hidden = self.applied.exclude(rank(raw, o))
+                self.update(key, jobs=jobs, sources=copy.deepcopy(statuses), fetched=len(raw), applied_hidden=hidden)
             if o['ai_pick'] and jobs:
                 count = min(len(jobs), ai.LIMIT)
                 self.update(key, current=f'Claude is ranking {count} role{"" if count == 1 else "s"}', source=None)
@@ -317,6 +442,11 @@ class Handler(BaseHTTPRequestHandler):
                                'claude_available': ai.available()})
         elif path == '/app':
             self.respond(200, app_release())
+        elif path == '/applied':
+            try:
+                self.respond(200, {'jobs': self.engine.applied.list()})
+            except StoreError as exc:
+                self.respond(500, {'error': str(exc)})
         elif path == '/app/fieldwork.apk':
             self.send_apk()
         elif path.startswith('/search/'):
@@ -342,19 +472,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
-        if self.path != '/search':
+        path = urlparse(self.path).path
+        if path not in ('/search', '/applied'):
             return self.respond(404, {'error': 'Not found'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= 8192:
+            # A job carries its description, so it may be larger than search options.
+            if not 0 < size <= (8192 if path == '/search' else 65536):
                 raise ValueError('Invalid request size.')
             self.connection.settimeout(10)
-            options = json.loads(self.rfile.read(size))
-            self.respond(202, {'id': self.engine.start(options)})
+            body = json.loads(self.rfile.read(size))
+            if path == '/applied':
+                return self.respond(200, {'job': self.engine.applied.add(body)})
+            self.respond(202, {'id': self.engine.start(body)})
         except (ValueError, TypeError):
-            self.respond(400, {'error': 'Invalid search options.'})
+            self.respond(400, {'error': 'Invalid search options.' if path == '/search' else 'Invalid job.'})
         except RuntimeError as exc:
             self.respond(409, {'error': str(exc)})
+        except StoreError as exc:
+            self.respond(500, {'error': str(exc)})
+    def do_DELETE(self):
+        if not self.authorized():
+            return
+        path = urlparse(self.path).path
+        if not path.startswith('/applied/'):
+            return self.respond(404, {'error': 'Not found'})
+        try:
+            self.respond(200, {'removed': self.engine.applied.remove(path.rsplit('/', 1)[1])})
+        except StoreError as exc:
+            self.respond(500, {'error': str(exc)})
 
 
 def main():

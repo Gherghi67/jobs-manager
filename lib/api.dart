@@ -25,6 +25,7 @@ class JobsApi {
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
+    bool delete = false,
   }) async {
     final uri = _uri(path);
     final headers = {
@@ -34,7 +35,9 @@ class JobsApi {
     final http.Response response;
     try {
       response =
-          await (body == null
+          await (delete
+                  ? client.delete(uri, headers: headers)
+                  : body == null
                   ? client.get(uri, headers: headers)
                   : client.post(uri, headers: headers, body: jsonEncode(body)))
               .timeout(const Duration(seconds: 20));

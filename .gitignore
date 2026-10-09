@@ -50,6 +50,7 @@ app.*.map.json
 # Personal state and service credentials
 backend/.access-token
 backend/profile.md
+backend/applied.json*
 __pycache__/
 *.pyc
 .env

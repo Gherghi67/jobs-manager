@@ -61,9 +61,106 @@ class RankingTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 s.validate_options(options)
 
+class AppliedTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.path = Path(self.folder.name) / 'applied.json'
+        self.store = s.AppliedStore(self.path)
+        self.job = s.rank([job()], s.validate_options({}))[0]
+
+    def test_applied_jobs_persist_privately(self):
+        first = self.store.add(self.job)
+        self.assertEqual(first['title'], 'Senior TypeScript Backend Engineer')
+        self.assertIn('applied_at', first)
+        # Marking the same job twice keeps the original date.
+        self.assertEqual(self.store.add(self.job)['applied_at'], first['applied_at'])
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        reloaded = s.AppliedStore(self.path)
+        self.assertEqual([j['id'] for j in reloaded.list()], [self.job['id']])
+        self.assertTrue(reloaded.remove(self.job['id']))
+        self.assertFalse(reloaded.remove(self.job['id']))
+        self.assertEqual(s.AppliedStore(self.path).list(), [])
+
+    def test_keeps_only_known_fields_and_caps_description(self):
+        record = self.store.add(dict(self.job, description='x' * 9000, secret='no'))
+        self.assertNotIn('secret', record)
+        self.assertEqual(len(record['description']), 6000)
+
+    def test_invalid_jobs_rejected(self):
+        for bad in [[], {'id': 'a', 'title': 'T'}, dict(self.job, url='javascript:alert(1)'), dict(self.job, id='x' * 65), dict(self.job, company=3)]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.store.add(bad)
+
+    def test_exclude_matches_id_url_and_company_title(self):
+        self.store.add(self.job)
+        same_role_elsewhere = job(location='Romania', url='https://other.example/apply')
+        same_url = job(company='Agency', title='Backend Engineer', url='https://www.example.com/job/#apply')
+        other = job(company='Another', title='Senior TypeScript Backend Engineer', url='https://example.com/other')
+        kept, hidden = self.store.exclude([dict(self.job), same_role_elsewhere, same_url, other])
+        self.assertEqual([j['company'] for j in kept], ['Another'])
+        self.assertEqual(hidden, 3)
+
+    def test_company_title_needs_a_company(self):
+        self.store.add(dict(self.job, company='', url='https://example.com/a'))
+        kept, hidden = self.store.exclude([job(company='', url='https://example.com/b')])
+        self.assertEqual((len(kept), hidden), (1, 0))
+
+    def test_company_entry_hides_every_role_at_that_company(self):
+        entry = self.store.add({'scope': 'company', 'company': 'Studio GmbH', 'title': 'Backend Engineer', 'applied_at': '2026-10-02T09:15:00+00:00', 'note': 'Thanks for applying'})
+        self.assertEqual((entry['company_key'], entry['applied_at']), ('studio', '2026-10-02T09:15:00+00:00'))
+        merged = self.store.add({'scope': 'company', 'company': 'studio', 'title': 'Platform Engineer'})
+        self.assertEqual(merged['id'], entry['id'])
+        self.assertEqual(merged['title'], 'Backend Engineer; Platform Engineer')
+        self.assertEqual(len(self.store.list()), 1)
+        rows = s.rank([job(title='Senior Python Engineer', description='Python backend', url='https://example.com/a'),
+                       job(company='Studio Inc.', url='https://example.com/b'), job(company='Studios United', url='https://example.com/c')],
+                      s.validate_options({}))
+        kept, hidden = self.store.exclude(rows)
+        self.assertEqual([j['company'] for j in kept], ['Studios United'])
+        self.assertEqual(hidden, 2)
+
+    def test_company_entries_validated(self):
+        for bad in [{'scope': 'company'}, {'scope': 'company', 'company': ' . '}, {'scope': 'company', 'company': 'X', 'applied_at': 'last week'}]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.store.add(bad)
+
+    def test_company_key_drops_legal_suffixes(self):
+        for name in ['Proxify AB', 'proxify', 'Proxify, Inc.', 'PROXIFY Sp. z o.o.']:
+            self.assertEqual(s.company_key(name), 'proxify')
+        self.assertEqual(s.company_key('AB'), 'ab')
+
+    def test_unreadable_file_is_never_overwritten(self):
+        self.path.write_text('{not json')
+        with self.assertRaises(s.StoreError):
+            self.store.add(self.job)
+        self.assertEqual(self.path.read_text(), '{not json')
+
+
 class EngineTests(unittest.TestCase):
+    def store(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        return s.AppliedStore(Path(folder.name) / 'applied.json')
+
+    def test_applied_roles_are_left_out_before_claude(self):
+        engine = s.Engine(self.store())
+        engine.applied.add(s.rank([job()], s.validate_options({}))[0])
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
+        engine.runs['x'] = {}
+        seen = []
+        def pick(jobs, o, cache):
+            seen.extend(j['company'] for j in jobs)
+            return jobs, dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job(), job(company='Fresh', url='https://example.com/fresh')]}), patch.object(s.ai, 'pick', pick):
+            engine.run('x', o)
+        result = engine.get('x')
+        self.assertEqual(seen, ['Fresh'])
+        self.assertEqual([j['company'] for j in result['jobs']], ['Fresh'])
+        self.assertEqual(result['applied_hidden'], 1)
+
     def test_partial_failure_keeps_working_source(self):
-        engine = s.Engine()
+        engine = s.Engine(self.store())
         o = s.validate_options({'adzuna': False, 'boards': ['remotive', 'remoteok'], 'ai_pick': False})
         engine.runs['x'] = {}
         with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job()], 'remoteok': lambda *a: (_ for _ in ()).throw(ValueError('secret-url'))}):
@@ -95,12 +192,37 @@ class ApiTests(unittest.TestCase):
         cls.token = 'test-token-not-a-real-credential'
         s.Handler.token = cls.token
         cls.url = 'http://127.0.0.1:%d' % cls.server.server_port
+        cls.folder = tempfile.TemporaryDirectory()
+        cls.engine = s.Handler.engine
+        s.Handler.engine = s.Engine(s.AppliedStore(Path(cls.folder.name) / 'applied.json'))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.server.server_close()
+        s.Handler.engine = cls.engine
+        cls.folder.cleanup()
+    def call(self, method, path, body=None, token=True):
+        headers = {'Authorization': 'Bearer ' + self.token} if token else {}
+        data = json.dumps(body).encode() if body is not None else None
+        with urlopen(Request(self.url + path, data=data, headers=headers, method=method)) as r:
+            return json.load(r)
+    def test_applied_endpoints(self):
+        row = s.rank([job()], s.validate_options({}))[0]
+        self.assertEqual(self.call('GET', '/applied'), {'jobs': []})
+        self.assertEqual(self.call('POST', '/applied', row)['job']['id'], row['id'])
+        self.assertEqual([j['id'] for j in self.call('GET', '/applied')['jobs']], [row['id']])
+        with self.assertRaises(HTTPError) as e:
+            self.call('POST', '/applied', {'title': 'No id'})
+        self.assertEqual(e.exception.code, 400)
+        for method, path in [('GET', '/applied'), ('DELETE', '/applied/' + row['id'])]:
+            with self.subTest(method=method), self.assertRaises(HTTPError) as e:
+                self.call(method, path, token=False)
+            self.assertEqual(e.exception.code, 401)
+        self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': True})
+        self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': False})
+        self.assertEqual(self.call('GET', '/applied'), {'jobs': []})
     def test_authentication_required(self):
         with self.assertRaises(HTTPError) as e:
             urlopen(self.url + '/health')

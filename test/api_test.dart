@@ -25,6 +25,20 @@ void main() {
     });
     api.close();
   });
+  test('delete requests send the bearer token', () async {
+    final api = JobsApi(
+      'https://service.example',
+      'test-token',
+      client: MockClient((r) async {
+        expect(r.method, 'DELETE');
+        expect(r.url.path, '/applied/one');
+        expect(r.headers['Authorization'], 'Bearer test-token');
+        return http.Response('{"removed":true}', 200);
+      }),
+    );
+    expect(await api.request('/applied/one', delete: true), {'removed': true});
+    api.close();
+  });
   test('authentication errors are actionable', () async {
     final api = JobsApi(
       'http://localhost:8765',

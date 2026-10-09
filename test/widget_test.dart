@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:jobs_manager/main.dart';
 
@@ -253,6 +255,174 @@ void main() {
       find.text(
         'Fieldwork 1.0.0 (build 29700000). Updates come from the service above.',
       ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('applied roles are stored on the service and leave Discover', (
+    tester,
+  ) async {
+    final job = {
+      'id': 'one',
+      'title': 'Platform Engineer',
+      'company': 'Applied Co',
+      'location': 'Europe',
+      'eligibility': 'europe',
+      'type': 'contract',
+      'score': 12,
+      'sources': ['remotive'],
+      'matched': {
+        'core': ['python'],
+      },
+      'description': 'Build a platform.',
+      'url': 'https://example.com/job',
+    };
+    final server = <String, Map<String, dynamic>>{};
+    final calls = <String>[];
+    final client = MockClient((r) async {
+      expect(r.headers['Authorization'], 'Bearer test-token');
+      calls.add('${r.method} ${r.url.path}');
+      if (r.method == 'POST' && r.url.path == '/applied') {
+        final body = jsonDecode(r.body) as Map<String, dynamic>;
+        server[body['id']] = {...body, 'applied_at': '2026-10-09T15:00:00Z'};
+        return http.Response(jsonEncode({'job': server[body['id']]}), 200);
+      }
+      if (r.method == 'DELETE') {
+        final removed = server.remove(r.url.pathSegments.last) != null;
+        return http.Response(jsonEncode({'removed': removed}), 200);
+      }
+      return http.Response(jsonEncode({'jobs': server.values.toList()}), 200);
+    });
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([job]),
+      'saved': jsonEncode({'one': job}),
+      'updated': '2026-10-09T10:00:00Z',
+      'url': 'https://service.example',
+      'token': 'test-token',
+    });
+    await tester.pumpWidget(JobsApp(httpClient: () => client));
+    await tester.pumpAndSettle();
+    expect(calls, ['GET /applied']);
+    await tester.scrollUntilVisible(
+      find.byTooltip('Mark as applied'),
+      220,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byTooltip('Mark as applied'));
+    await tester.pumpAndSettle();
+    expect(server.keys, ['one']);
+    expect(server['one']!['title'], 'Platform Engineer');
+    expect(find.text('0 opportunities'), findsOneWidget);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('applied'), contains('Platform Engineer'));
+    expect(prefs.getString('saved'), '{}');
+
+    await tester.tap(find.text('Applied').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Already applied.'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Platform Engineer'),
+      220,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('1 applied role'), findsOneWidget);
+    expect(find.textContaining('Applied 2026-10-09 · Jobs by'), findsOneWidget);
+    expect(find.byTooltip('Save job'), findsNothing);
+    await tester.tap(find.byTooltip('Mark as not applied'));
+    await tester.pumpAndSettle();
+    expect(server, isEmpty);
+    expect(find.text('0 applied roles'), findsOneWidget);
+    expect(calls, contains('DELETE /applied/one'));
+
+    await tester.tap(find.text('Discover').last);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('1 opportunity'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('1 opportunity'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a company from an application email hides its roles', (
+    tester,
+  ) async {
+    Map<String, dynamic> listing(String id, String company) => {
+      'id': id,
+      'title': 'Backend Engineer',
+      'company': company,
+      'company_key': company.toLowerCase(),
+      'location': 'Europe',
+      'eligibility': 'europe',
+      'type': 'contract',
+      'score': 10,
+      'sources': ['remotive'],
+      'matched': {
+        'core': ['python'],
+      },
+      'description': 'APIs.',
+      'url': 'https://example.com/$id',
+    };
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([listing('a', 'Acme'), listing('b', 'Other')]),
+      'applied': jsonEncode({
+        'company-1': {
+          'id': 'company-1',
+          'scope': 'company',
+          'company': 'Acme GmbH',
+          'company_key': 'acme',
+          'title': '',
+          'note': 'Thank you for applying to Acme',
+          'applied_at': '2026-10-02T09:15:00+00:00',
+        },
+      }),
+      'updated': '2026-10-09T10:00:00Z',
+    });
+    await tester.pumpWidget(const JobsApp());
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('1 opportunity'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.scrollUntilVisible(
+      find.text('Other'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Acme'), findsNothing);
+    await tester.tap(find.text('Applied').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Every role at this company'), findsOneWidget);
+    expect(find.text('Thank you for applying to Acme'), findsOneWidget);
+    expect(
+      find.text(
+        'Applied 2026-10-02 · From your email · Searches hide every role here',
+      ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a search reports roles left out as already applied', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([]),
+      'applied_hidden': 2,
+      'updated': '2026-10-09T10:00:00Z',
+    });
+    await tester.pumpWidget(const JobsApp());
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Left out 2 roles you already applied to.'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.text('Left out 2 roles you already applied to.'),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
