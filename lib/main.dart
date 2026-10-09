@@ -9,8 +9,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
+import 'applications.dart';
 import 'downloads.dart';
 import 'models.dart';
+import 'stats.dart';
 import 'updater.dart';
 
 void main() => runApp(const JobsApp());
@@ -81,6 +83,8 @@ class _JobsHomeState extends State<JobsHome> {
   int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
   int appliedVersion = 0;
   JobsApi? activeApi;
+  // One list serves every tab; a new tab starts at its top.
+  final listScroll = ScrollController();
 
   @override
   void initState() {
@@ -92,6 +96,7 @@ class _JobsHomeState extends State<JobsHome> {
   void dispose() {
     generation++;
     activeApi?.close();
+    listScroll.dispose();
     super.dispose();
   }
 
@@ -416,6 +421,58 @@ class _JobsHomeState extends State<JobsHome> {
     }
   }
 
+  // Sends a change to an application (status, details, notes, follow-up date)
+  // and keeps the service's answer. Throws with a message for the sheet.
+  Future<Map<String, dynamic>> updateApplication(
+    String id,
+    Map<String, dynamic> change,
+  ) async {
+    final api = this.api();
+    try {
+      final result = await api.request(
+        '/applied/${Uri.encodeComponent(id)}',
+        body: change,
+        method: 'PATCH',
+      );
+      final entry = Map<String, dynamic>.from(result['job'] as Map);
+      if (mounted) {
+        setState(() {
+          appliedVersion++;
+          applied[id] = entry;
+        });
+        unawaited(persist());
+      }
+      return entry;
+    } finally {
+      api.close();
+    }
+  }
+
+  void openApplication(Job j) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheet) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .9,
+        maxChildSize: .95,
+        builder: (sheet, controller) => ApplicationSheet(
+          controller: controller,
+          entry: Map<String, dynamic>.from(applied[j.id] as Map),
+          save: (change) => updateApplication(j.id, change),
+          openLink: (url) => unawaited(openLink(url)),
+          openListing: j.companyWide
+              ? null
+              : () {
+                  Navigator.pop(sheet);
+                  detail(j);
+                },
+        ),
+      ),
+    );
+  }
+
   // Company entries (from application emails) that do [match] in searches.
   Iterable<Map> companyEntries(String match) =>
       applied.values.cast<Map>().where(
@@ -670,6 +727,9 @@ class _JobsHomeState extends State<JobsHome> {
           setState(() {
             tab = v;
           });
+          if (listScroll.hasClients) {
+            listScroll.jumpTo(0);
+          }
           if (v == 2) {
             unawaited(syncApplied());
           }
@@ -698,6 +758,7 @@ class _JobsHomeState extends State<JobsHome> {
           : RefreshIndicator(
               onRefresh: tab == 2 ? syncApplied : search,
               child: ListView(
+                controller: listScroll,
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
                 children: [
@@ -884,6 +945,15 @@ class _JobsHomeState extends State<JobsHome> {
                         style: TextStyle(color: Colors.orange.shade900),
                       ),
                     ),
+                  if (tab == 2 && applied.isNotEmpty) ...[
+                    StatsPanel(
+                      stats: ApplicationStats.of(
+                        applied.values.cast<Map>(),
+                        DateTime.now(),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                  ],
                   TextField(
                     onChanged: (v) => setState(() {
                       filter = v;
@@ -980,7 +1050,11 @@ class _JobsHomeState extends State<JobsHome> {
                       child: Card(
                         child: InkWell(
                           borderRadius: BorderRadius.circular(22),
-                          onTap: j.companyWide ? null : () => detail(j),
+                          onTap: tab == 2 && applied.containsKey(j.id)
+                              ? () => openApplication(j)
+                              : j.companyWide
+                              ? null
+                              : () => detail(j),
                           child: Padding(
                             padding: const EdgeInsets.all(18),
                             child: Column(
@@ -1038,10 +1112,14 @@ class _JobsHomeState extends State<JobsHome> {
                                     color: ink,
                                   ),
                                 ),
+                                if (tab == 2) ...[
+                                  const SizedBox(height: 10),
+                                  applicationPills(j.data),
+                                ],
                                 if (j.companyWide) ...[
                                   const SizedBox(height: 10),
                                   Text(
-                                    j.text('note'),
+                                    latestEmail(j.data),
                                     style: const TextStyle(
                                       color: Colors.black54,
                                     ),
@@ -1170,6 +1248,30 @@ class _JobsHomeState extends State<JobsHome> {
                 ],
               ),
             ),
+    );
+  }
+
+  // Status, follow-up date and channel on an Applied card.
+  Widget applicationPills(Map entry) {
+    final due = followUp(entry);
+    final channel = (entry['channel'] ?? '').toString();
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        pill(
+          statusLabel(statusOf(entry)),
+          progressStatuses.contains(statusOf(entry)),
+        ),
+        if (due != null)
+          pill(
+            followUpDue(entry, DateTime.now())
+                ? 'Follow up due ${shortDate(due)}'
+                : 'Follow up ${shortDate(due)}',
+            followUpDue(entry, DateTime.now()),
+          ),
+        if (channel.isNotEmpty) pill('Via $channel', false),
+      ],
     );
   }
 

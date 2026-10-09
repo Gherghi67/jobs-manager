@@ -86,6 +86,21 @@ Tap the check icon on a card, or **Mark as applied** in a role's details, once y
 - Listings from searches before this change carry no company tag, so company entries take effect on them after the next search.
 - `GET /applied` lists them, `POST /applied` adds a role, and `DELETE /applied/<id>` removes one. All three need the access token.
 
+### Tracking and statistics
+
+Tap any card in the Applied tab to open everything kept about that application:
+
+- **Status:** Applied, Screening, Assessment, Interview, Offer, Rejected, No reply or Withdrawn. Every change is kept in a dated history that notes whether it came from the app or from an email. A status dated earlier than the current one, such as one from an older email, fills in the history without replacing the current status.
+- **Follow up:** a date. The stats panel counts follow-ups that are due, and the card shows "Follow up due". There are no phone notifications.
+- **Details:** link to the posting, location, salary or rate, contract type, where you applied (the ATS or platform) and notes of up to 4,000 characters. Company entries also take a role title.
+- **Emails:** the trail of confirmations, rejections and other messages, newest first, with the sender's domain. Entries saved before this feature had the confirmation subject as `note`; the service turns it into the first email.
+
+Each card shows its status, the follow-up date and the channel. The top of the Applied tab shows **Your applications**, computed on the phone from the list, so it also works offline. It has four numbers: applications, the last 7 days, how many heard back (any reply, including rejections) and the median wait for a first reply. Below them are applications per week for 8 weeks, current statuses, where you applied, and a rough role family from the title (AI / ML, lead or founding, full-stack, backend). **Hide charts** collapses it.
+
+`PATCH /applied/<id>` takes any of `status` (with optional `status_at` and `source`: `app` or `email`), `notes`, `follow_up` (`YYYY-MM-DD` or empty), `url`, `location`, `salary`, `type`, `channel`, `emails` (a list of `{date, kind, from, subject}` to add; repeats are skipped), plus `title` and `match` for company entries. It returns the updated entry, 400 with a readable message for invalid values, and 404 for an unknown id.
+
+On October 9, 2026, statuses were filled in from the personal Gmail (September 27 – October 9). Voodoo (October 8) and Modash (October 9) sent rejections, and nothing else had replied yet. Each entry received its channel and email trail, Modash its location, and Jobgether its contract type. One more application was added: TeamQuest (AI-Augmented Developer, Fullstack), sent through SOLID.Jobs on October 2. None of the confirmations linked the actual posting, so the links are empty.
+
 ## Options and behavior
 
 - Defaults from your October 9 cv-refactor preferences: fully remote, Romania/Europe/worldwide eligibility, contracts first, backend/AI/Python/Go focus.
@@ -119,7 +134,8 @@ The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`
 
 ## Verification (October 9, 2026)
 
-- 139 Python tests and 24 Flutter tests passed; `flutter analyze` reported no issues.
+- 141 Python tests and 31 Flutter tests passed; `flutter analyze` reported no issues.
+- Application tracking: a dry run of the Gmail import against a copy of `applied.json` on a temporary instance exposed two migration bugs, both fixed and tested: old entries without `match`, and a duplicate of the migrated confirmation email. A second run changed nothing. The real list then held 16 entries, all with a channel and 2 rejected, Proxify still a badge entry and Jobgether still role-only. On the emulator (build 29859344), the stats matched the data (16 applications, 2 heard back, a 3-day median first reply), and a follow-up date set in the sheet reached the service and was cleared again.
 - CV download, emulator (Android 14, build 29859312): `GET /cv` returned the 43,366-byte PDF locally and through the Tailscale address, and 401 without the token. The top-bar button saved `Bogdan-Gherghina-CV.pdf` to Downloads, byte-identical to `cv/`. **Open** showed it in the Drive PDF viewer. A second tap replaced the same file instead of adding a copy.
 - Applied jobs, live: on a separate service instance, a Remotive + Himalayas search returned 11 roles. After the first was marked as applied, the same search returned 10 with one left out, and after it was unmarked, 11 again. On the emulator (build 29859265), the check icon moved a role from Discover (79 → 78) to the Applied tab on the real service, and unmarking it there brought Discover back to 79 and emptied the service's list. Both `GET` and `DELETE /applied` also worked through the Tailscale address.
 - In-app update, emulator: build 29859242 reported "You have the latest build". After build 29859244 was published, the button offered it and opened the "Install unknown apps" setting once. It then downloaded and verified the build and showed Android's update dialog. After confirming, the device reported versionCode 29859244, and saved results and options were intact. After moving install results to the non-exported receiver, a second pass updated 29859248 → 29859249 the same way, with no logcat crashes or blocked activity launches.

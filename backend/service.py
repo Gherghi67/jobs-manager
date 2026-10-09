@@ -156,6 +156,42 @@ class StoreError(Exception):
     pass
 
 
+# Where an application stands, in the order the app lists them.
+STATUSES = ('applied', 'screening', 'assessment', 'interview', 'offer', 'rejected', 'no_reply', 'withdrawn')
+EMAIL_KINDS = ('confirmation', 'screening', 'assessment', 'interview', 'offer', 'rejection', 'update', 'sent')
+# Editable on every entry, with their length limits. A role's listing id still identifies it in searches.
+DETAIL_FIELDS = {'url': 1000, 'location': 200, 'salary': 200, 'type': 100, 'channel': 100}
+PATCH_FIELDS = {'match', 'title', 'status', 'status_at', 'source', 'notes', 'follow_up', 'emails', *DETAIL_FIELDS}
+
+
+def utc_iso(value):
+    """An ISO timestamp in UTC, so history and emails sort as text. Raises ValueError."""
+    when = dt.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    return (when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc).isoformat(timespec='seconds')
+
+
+def tracking(entry):
+    """Fills in the tracking fields on entries saved before they existed."""
+    try:
+        applied_at = utc_iso(entry.get('applied_at'))
+    except ValueError:
+        applied_at = str(entry.get('applied_at', ''))
+    entry.setdefault('emails', [])
+    note = entry.pop('note', '')
+    if note and not any(e.get('subject') == note for e in entry['emails']):
+        # Entries imported from email kept the confirmation's subject as a note.
+        entry['emails'].insert(0, {'date': applied_at, 'kind': 'confirmation', 'from': '', 'subject': note})
+    from_email = entry.get('scope') == 'company' and entry.get('source') == 'email'
+    entry.setdefault('history', [{'status': 'applied', 'at': applied_at, 'source': 'email' if from_email else 'app'}])
+    entry.setdefault('status', entry['history'][-1]['status'])
+    for key in ('notes', 'follow_up', 'channel'):
+        entry.setdefault(key, '')
+    if entry.get('scope') == 'company':
+        # The first email import saved entries before match existed.
+        entry.setdefault('match', 'company')
+    return entry
+
+
 LEGAL_SUFFIXES = {'inc', 'llc', 'ltd', 'limited', 'gmbh', 'ag', 'ab', 'bv', 'nv', 'srl', 'sa', 'sas', 'sarl', 'spa',
                   'plc', 'corp', 'corporation', 'co', 'oy', 'as', 'aps', 'pty', 'kg', 'ou', 'sp', 'z', 'oo'}
 
@@ -210,7 +246,7 @@ class AppliedStore:
             except (OSError, ValueError, KeyError, TypeError):
                 # Never overwrite a file we could not read: it holds the user's application history.
                 raise StoreError(f'{self.path.name} on the service could not be read.')
-            self.jobs = {j['id']: j for j in rows if isinstance(j, dict) and isinstance(j.get('id'), str)}
+            self.jobs = {j['id']: tracking(j) for j in rows if isinstance(j, dict) and isinstance(j.get('id'), str)}
         return self.jobs
 
     def save(self):
@@ -235,6 +271,7 @@ class AppliedStore:
             raise ValueError('Invalid job.')
         record['description'] = str(record.get('description') or '')[:6000]
         record['applied_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+        tracking(record)
         with self.lock:
             jobs = self.load()
             if record['id'] not in jobs:
@@ -253,6 +290,7 @@ class AppliedStore:
                       company_key=key, title=str(entry.get('title') or '')[:300], source=str(entry.get('source') or 'email')[:40],
                       note=str(entry.get('note') or '')[:500], applied_at=str(applied_at), match=entry.get('match', 'company'))
         self.check_match(record)
+        tracking(record)
         with self.lock:
             jobs = self.load()
             existing = jobs.get(record['id'])
@@ -275,14 +313,79 @@ class AppliedStore:
 
     def set_match(self, entry_id, match):
         """Changes what a company entry does in searches. Returns the entry, or None if there is no such company entry."""
+        return self.update(entry_id, {'match': match})
+
+    def update(self, entry_id, change):
+        """Applies a change from the app or the email import: status, details, notes, follow-up date, emails or match.
+        Returns the entry, or None if there is no such entry (or no such company entry, for match and title).
+        ValueError messages are written for the app."""
+        if not isinstance(change, dict) or not change or not set(change) <= PATCH_FIELDS:
+            raise ValueError('Invalid change.')
+        if ('status_at' in change or 'source' in change) and 'status' not in change:
+            raise ValueError('Invalid change.')
         with self.lock:
             entry = self.load().get(entry_id)
-            if entry is None or entry.get('scope') != 'company':
+            if entry is None or (entry.get('scope') != 'company' and ({'match', 'title'} & set(change))):
                 return None
-            self.check_match(dict(entry, match=match))
-            entry['match'] = match
+            new = copy.deepcopy(entry)
+            for key, limit in DETAIL_FIELDS.items():
+                if key in change:
+                    value = change[key]
+                    if not isinstance(value, str) or len(value) > limit:
+                        raise ValueError(f'The {key} is too long.')
+                    if key == 'url' and value and not value.startswith(('https://', 'http://')):
+                        raise ValueError('The link must start with https://.')
+                    new[key] = value.strip()
+            if 'title' in change:
+                if not isinstance(change['title'], str) or len(change['title']) > 300:
+                    raise ValueError('The title is too long.')
+                new['title'] = change['title'].strip()
+            if 'match' in change:
+                new['match'] = change['match']
+            if 'notes' in change:
+                if not isinstance(change['notes'], str) or len(change['notes']) > 4000:
+                    raise ValueError('Notes are limited to 4,000 characters.')
+                new['notes'] = change['notes']
+            if 'follow_up' in change:
+                value = change['follow_up']
+                if not isinstance(value, str) or (value and dt.date.fromisoformat(value).isoformat() != value):
+                    raise ValueError('Invalid follow-up date.')
+                new['follow_up'] = value
+            if 'emails' in change:
+                self.add_emails(new, change['emails'])
+            if 'status' in change:
+                if change['status'] not in STATUSES or change.get('source', 'app') not in ('app', 'email'):
+                    raise ValueError('Unknown status.')
+                at = utc_iso(change.get('status_at') or dt.datetime.now(dt.timezone.utc).isoformat())
+                step = {'status': change['status'], 'at': at, 'source': change.get('source', 'app')}
+                # Picking the current status again, or replaying an email, adds nothing.
+                repeat = change['status'] == new['status'] and 'status_at' not in change
+                if not repeat and not any(h['status'] == step['status'] and h['at'] == at for h in new['history']):
+                    new['history'] = sorted(new['history'] + [step], key=lambda h: h['at'])
+                # A status dated earlier (from an old email) doesn't replace a newer one.
+                new['status'] = new['history'][-1]['status']
+            if new.get('scope') == 'company':
+                self.check_match(new)
+            self.load()[entry_id] = new
             self.save()
-            return copy.deepcopy(entry)
+            return copy.deepcopy(new)
+
+    @staticmethod
+    def add_emails(entry, emails):
+        if not isinstance(emails, list) or len(emails) > 50:
+            raise ValueError('Invalid emails.')
+        for e in emails:
+            if not isinstance(e, dict) or e.get('kind') not in EMAIL_KINDS or not isinstance(e.get('subject'), str):
+                raise ValueError('Invalid email.')
+            row = {'date': utc_iso(e.get('date')), 'kind': e['kind'], 'from': str(e.get('from') or '')[:200],
+                   'subject': e['subject'][:200]}
+            same = next((x for x in entry['emails'] if x['date'] == row['date'] and x['subject'] == row['subject']), None)
+            if same is None:
+                entry['emails'].append(row)
+            elif not same.get('from'):
+                same['from'] = row['from']
+        # Oldest first; the newest 100 are kept.
+        entry['emails'] = sorted(entry['emails'], key=lambda x: x['date'])[-100:]
 
     def remove(self, job_id):
         with self.lock:
@@ -571,17 +674,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(404, {'error': 'Not found'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= 1024:
+            # Notes and email trails make a change larger than a match switch.
+            if not 0 < size <= 32768:
                 raise ValueError('Invalid request size.')
             self.connection.settimeout(10)
             body = json.loads(self.rfile.read(size))
         except (ValueError, TypeError):
             return self.respond(400, {'error': 'Invalid change.'})
         try:
-            entry = self.engine.applied.set_match(path.rsplit('/', 1)[1], body.get('match') if isinstance(body, dict) else None)
-            self.respond(200 if entry else 404, {'job': entry} if entry else {'error': 'No such company entry.'})
+            entry = self.engine.applied.update(path.rsplit('/', 1)[1], body)
+            self.respond(200 if entry else 404, {'job': entry} if entry else {'error': 'No such application.'})
         except ValueError as exc:
-            # set_match's messages are written for the app.
+            # update's messages are written for the app.
             self.respond(400, {'error': str(exc)})
         except StoreError as exc:
             self.respond(500, {'error': str(exc)})

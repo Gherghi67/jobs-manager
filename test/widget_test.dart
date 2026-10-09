@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:jobs_manager/applications.dart';
 import 'package:jobs_manager/main.dart';
 
 void main() {
@@ -405,6 +406,118 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('applications show stats and keep status, details and notes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1080, 2400);
+    tester.view.devicePixelRatio = 2.6;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final server = <String, Map<String, dynamic>>{
+      'company-1': {
+        'id': 'company-1',
+        'scope': 'company',
+        'company': 'Voodoo',
+        'company_key': 'voodoo',
+        'title': 'Senior Backend Engineer',
+        'source': 'email',
+        'match': 'company',
+        'applied_at': '2026-10-07T18:53:36+00:00',
+        'status': 'applied',
+        'history': [
+          {
+            'status': 'applied',
+            'at': '2026-10-07T18:53:36+00:00',
+            'source': 'email',
+          },
+        ],
+        'emails': [
+          {
+            'date': '2026-10-07T18:53:36+00:00',
+            'kind': 'confirmation',
+            'from': 'ashbyhq.com',
+            'subject': "Welcome to Voodoo's recruitment process!",
+          },
+        ],
+        'channel': 'Ashby',
+        'notes': '',
+        'follow_up': '',
+      },
+    };
+    final patches = <Map<String, dynamic>>[];
+    final client = MockClient((r) async {
+      if (r.method == 'PATCH') {
+        final change = jsonDecode(r.body) as Map<String, dynamic>;
+        patches.add(change);
+        final entry = server['company-1']!..addAll(change);
+        if (change.containsKey('status')) {
+          entry['history'] = [
+            ...entry['history'] as List,
+            {
+              'status': change['status'],
+              'at': '2026-10-09T15:00:00+00:00',
+              'source': 'app',
+            },
+          ];
+        }
+        return http.Response(jsonEncode({'job': entry}), 200);
+      }
+      return http.Response(jsonEncode({'jobs': server.values.toList()}), 200);
+    });
+    SharedPreferences.setMockInitialValues({'token': 'test-token'});
+    await tester.pumpWidget(JobsApp(httpClient: () => client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.check_circle_outline).last);
+    await tester.pumpAndSettle();
+    expect(find.text('Your applications'), findsOneWidget);
+    expect(find.text('Heard back'), findsOneWidget);
+    expect(find.text('Applications per week'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Via Ashby'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.text("Welcome to Voodoo's recruitment process!"),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Via Ashby'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Via Ashby'));
+    await tester.pumpAndSettle();
+    expect(find.text('STATUS'), findsOneWidget);
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Interview'));
+    await tester.pumpAndSettle();
+    expect(patches.last, {'status': 'interview'});
+    expect(find.text('Status updated.'), findsOneWidget);
+    expect(find.textContaining('Interview · 9 Oct 2026'), findsOneWidget);
+    final notes = find.widgetWithText(TextField, 'Notes');
+    // The sheet builds lazily; scroll its own list, not a text field's.
+    await tester.scrollUntilVisible(
+      notes,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(ApplicationSheet),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.ensureVisible(notes);
+    await tester.enterText(notes, 'Ask about on-call.');
+    await tester.ensureVisible(find.text('Save details'));
+    await tester.tap(find.text('Save details'));
+    await tester.pumpAndSettle();
+    expect(patches.last, {'notes': 'Ask about on-call.'});
+    expect(find.text('Details saved.'), findsOneWidget);
+    await tester.tapAt(const Offset(20, 20));
+    await tester.pumpAndSettle();
+    // The card and the stats follow the change.
+    expect(find.text('Interview'), findsWidgets);
+    expect(find.text('100% of applications'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a company from an application email hides its roles', (
     tester,
   ) async {
@@ -454,6 +567,11 @@ void main() {
     expect(find.text('Acme'), findsNothing);
     await tester.tap(find.text('Applied').last);
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Company application'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Company application'), findsOneWidget);
     expect(find.text('Thank you for applying to Acme'), findsOneWidget);
     expect(
@@ -566,11 +684,15 @@ void main() {
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('2 applied roles'),
-      -200,
+      200,
       scrollable: list,
     );
     expect(find.text('2 applied roles'), findsOneWidget);
-    expect(find.textContaining('Searches hide only this role'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.textContaining('Searches hide only this role'),
+      200,
+      scrollable: list,
+    );
     // Proxify was applied to later, so its card comes first.
     final hideAll = find.text('Hide all').first;
     await tester.scrollUntilVisible(hideAll, 200, scrollable: list);

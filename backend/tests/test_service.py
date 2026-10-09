@@ -155,6 +155,61 @@ class AppliedTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.add({'scope': 'company', 'company': 'New', 'match': 'role'})
 
+    def test_entries_saved_before_tracking_gain_its_fields(self):
+        self.path.write_text(json.dumps({'jobs': [{'id': 'company-1', 'scope': 'company', 'company': 'Modash', 'company_key': 'modash',
+                                                   'title': '', 'source': 'email', 'note': 'Thanks for applying to Modash',
+                                                   'applied_at': '2026-10-02T20:23:02Z'}]}))
+        entry = s.AppliedStore(self.path).list()[0]
+        self.assertNotIn('note', entry)
+        self.assertEqual(entry['emails'], [{'date': '2026-10-02T20:23:02+00:00', 'kind': 'confirmation', 'from': '',
+                                            'subject': 'Thanks for applying to Modash'}])
+        self.assertEqual((entry['status'], entry['notes'], entry['follow_up'], entry['channel']), ('applied', '', '', ''))
+        self.assertEqual(entry['history'], [{'status': 'applied', 'at': '2026-10-02T20:23:02+00:00', 'source': 'email'}])
+        self.assertEqual(entry['match'], 'company')
+        updated = s.AppliedStore(self.path).update('company-1', {'channel': 'Workable', 'emails': [
+            {'date': '2026-10-02T20:23:02Z', 'kind': 'confirmation', 'from': 'workablemail.com', 'subject': 'Thanks for applying to Modash'}]})
+        # The same email again, from the Gmail import, is not added twice.
+        self.assertEqual((updated['channel'], len(updated['emails'])), ('Workable', 1))
+        self.assertEqual(updated['emails'][0]['from'], 'workablemail.com')
+        role = self.store.add(self.job)
+        self.assertEqual([h['status'] for h in role['history']], ['applied'])
+        self.assertEqual(role['history'][0]['source'], 'app')
+
+    def test_applications_track_status_details_notes_and_emails(self):
+        entry = self.store.add({'scope': 'company', 'company': 'Voodoo', 'applied_at': '2026-10-07T18:53:36Z'})
+        updated = self.store.update(entry['id'], {'status': 'interview'})
+        self.assertEqual(updated['status'], 'interview')
+        self.assertEqual(self.store.update(entry['id'], {'status': 'interview'})['history'], updated['history'])
+        # An older email fills the history in without replacing the newer status.
+        updated = self.store.update(entry['id'], {'status': 'screening', 'status_at': '2026-10-08T09:00:00Z', 'source': 'email',
+                                                  'emails': [{'date': '2026-10-08T09:00:00Z', 'kind': 'screening', 'from': 'voodoo.io',
+                                                              'subject': 'Next steps'}]})
+        self.assertEqual([h['status'] for h in updated['history']], ['applied', 'screening', 'interview'])
+        self.assertEqual(updated['history'][1], {'status': 'screening', 'at': '2026-10-08T09:00:00+00:00', 'source': 'email'})
+        self.assertEqual(updated['status'], 'interview')
+        again = self.store.update(entry['id'], {'emails': [{'date': '2026-10-08T09:00:00+00:00', 'kind': 'screening', 'subject': 'Next steps'},
+                                                           {'date': '2026-10-07T18:53:36Z', 'kind': 'confirmation', 'subject': 'Welcome'}]})
+        self.assertEqual([e['subject'] for e in again['emails']], ['Welcome', 'Next steps'])
+        details = {'title': 'Senior Backend Engineer', 'url': 'https://jobs.example/voodoo', 'location': 'Remote, Europe',
+                   'salary': '€80k', 'type': 'full-time', 'channel': 'Lever', 'notes': 'Ask about on-call.', 'follow_up': '2026-10-14'}
+        updated = self.store.update(entry['id'], details)
+        self.assertEqual({k: updated[k] for k in details}, details)
+        self.assertEqual(s.AppliedStore(self.path).list()[0], updated)
+        self.assertEqual(self.store.update(entry['id'], {'follow_up': ''})['follow_up'], '')
+        role = self.store.add(self.job)
+        self.assertEqual(self.store.update(role['id'], {'status': 'rejected', 'notes': 'Too senior'})['status'], 'rejected')
+        self.assertIsNone(self.store.update(role['id'], {'title': 'Renamed'}))
+        self.assertIsNone(self.store.update('missing', {'status': 'offer'}))
+        for bad in [{}, {'status': 'ghosted'}, {'status_at': '2026-10-08'}, {'status': 'offer', 'source': 'phone'},
+                    {'follow_up': '14/10/2026'}, {'follow_up': '2026-10-14T10:00'}, {'url': 'jobs.example/voodoo'},
+                    {'notes': 'x' * 4001}, {'salary': 5}, {'emails': [{'kind': 'reply', 'subject': 'Hi', 'date': '2026-10-08'}]},
+                    {'emails': [{'kind': 'offer', 'subject': 'Offer', 'date': 'soon'}]}, {'applied_at': '2026-01-01'}, []]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.store.update(entry['id'], bad)
+        with self.assertRaises(ValueError):
+            self.store.update(entry['id'], {'match': 'role', 'title': ''})
+        self.assertEqual(self.store.list()[-1]['title'], 'Senior Backend Engineer')
+
     def test_company_entries_validated(self):
         for bad in [{'scope': 'company'}, {'scope': 'company', 'company': ' . '}, {'scope': 'company', 'company': 'X', 'applied_at': 'last week'}]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -272,6 +327,8 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(e.exception.code, 401)
         entry = self.call('POST', '/applied', {'scope': 'company', 'company': 'Proxify AB'})['job']
         self.assertEqual(self.call('PATCH', '/applied/' + entry['id'], {'match': 'badge'})['job']['match'], 'badge')
+        tracked = self.call('PATCH', '/applied/' + entry['id'], {'status': 'interview', 'notes': 'Call on Monday', 'channel': 'Ashby'})['job']
+        self.assertEqual((tracked['status'], tracked['notes'], tracked['channel'], tracked['match']), ('interview', 'Call on Monday', 'Ashby', 'badge'))
         for path, body, code in [('/applied/' + entry['id'], {'match': 'role'}, 400), ('/applied/missing', {'match': 'badge'}, 404),
                                  ('/applied/' + row['id'], {'match': 'badge'}, 404)]:
             with self.subTest(path=path, body=body), self.assertRaises(HTTPError) as e:
