@@ -101,6 +101,18 @@ Each card shows its status, the follow-up date and the channel. The top of the A
 
 On October 9, 2026, statuses were filled in from the personal Gmail (September 27 – October 9). Voodoo (October 8) and Modash (October 9) sent rejections, and nothing else had replied yet. Each entry received its channel and email trail, Modash its location, and Jobgether its contract type. One more application was added: TeamQuest (AI-Augmented Developer, Fullstack), sent through SOLID.Jobs on October 2. None of the confirmations linked the actual posting, so the links are empty.
 
+## Talk to Claude
+
+The speech-bubble icon in the top bar opens a chat with Claude Code on the computer that runs the service. Each message runs `claude -p` in the chat's folder and continues that chat's Claude Code session, with your settings, CLAUDE.md files, hooks and MCP connectors (Gmail included). Replies stream into the page while Claude works. Each command or file Claude touches appears as a one-line row, and **Stop** ends the reply along with any commands it started.
+
+- **Permissions:** auto mode, as at the desk. The classifier blocks risky actions, which appear as "Blocked by auto mode" rows. Anything that would wait for a permission prompt is refused, because nobody is at the terminal. Permission checks are never switched off.
+- **Folders:** a new chat works in `~/Documents` or one of its visible subfolders; the app remembers the last choice. `JOBS_CLAUDE_ROOTS` (paths separated by `:`) changes the roots.
+- **History:** chats live in gitignored `backend/chats.json` (mode 600). **Chats** reopens or deletes one; deleting leaves Claude Code's own session files alone. The page opens on the latest chat. A reply that was running when the service stopped shows as interrupted.
+- **Limits:** one reply at a time per chat, three chats at once, 30 minutes per reply, 20,000 characters per message. When Claude Code warns that a subscription limit is near, the reply shows how much is used and when it resets.
+- **Security:** the service access token now lets whoever holds it run commands on this computer, within auto mode's limits. The service listens on `127.0.0.1` and is published only on the tailnet. Start the service with `JOBS_CLAUDE_CHAT=off` to switch the page off (the API then answers 403).
+
+The API: `GET /claude/folders`, `GET /claude/chats`, `GET /claude/chats/<id>?from=<turn>` (turns from that index, which the app polls every second while Claude works), `POST /claude/chats` with `{cwd, text}`, `POST /claude/chats/<id>/messages` with `{text}` (409 while a reply is running), `POST /claude/chats/<id>/stop` and `DELETE /claude/chats/<id>`.
+
 ## Options and behavior
 
 - Defaults from your October 9 cv-refactor preferences: fully remote, Romania/Europe/worldwide eligibility, contracts first, backend/AI/Python/Go focus.
@@ -130,10 +142,11 @@ python3 -m unittest discover -s backend/tests -v   # never calls Claude; the AI 
 
 The backend tests include the original collector regression suite, preference/eligibility cases, caching, partial failures, and actual local HTTP authentication. HTTP tests need permission to open a localhost socket.
 
-The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
+The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `backend/claude_chat.py` (the Claude page), `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
 
 ## Verification (October 9, 2026)
 
+- Talk to Claude, live, on a temporary service instance (the running service had the page switched off): a new chat in `~/Documents` ran Bash in auto mode and answered in 11 seconds on Opus with the subscription login. A second message resumed the same session and remembered the answer. The chat list and delete worked. The page itself is covered by widget tests and hasn't been run on the emulator or the phone yet.
 - 141 Python tests and 31 Flutter tests passed; `flutter analyze` reported no issues.
 - Application tracking: a dry run of the Gmail import against a copy of `applied.json` on a temporary instance exposed two migration bugs, both fixed and tested: old entries without `match`, and a duplicate of the migrated confirmation email. A second run changed nothing. The real list then held 16 entries, all with a channel and 2 rejected, Proxify still a badge entry and Jobgether still role-only. On the emulator (build 29859344), the stats matched the data (16 applications, 2 heard back, a 3-day median first reply), and a follow-up date set in the sheet reached the service and was cleared again.
 - CV download, emulator (Android 14, build 29859312): `GET /cv` returned the 43,366-byte PDF locally and through the Tailscale address, and 401 without the token. The top-bar button saved `Bogdan-Gherghina-CV.pdf` to Downloads, byte-identical to `cv/`. **Open** showed it in the Drive PDF viewer. A second tap replaced the same file instead of adding a copy.

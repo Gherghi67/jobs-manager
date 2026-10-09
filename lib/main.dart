@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
 import 'applications.dart';
+import 'claude_chat.dart';
 import 'downloads.dart';
 import 'models.dart';
 import 'stats.dart';
@@ -512,6 +513,16 @@ class _JobsHomeState extends State<JobsHome> {
     }
   }
 
+  // Claude Code on the service's computer, in a chat page of its own.
+  void openClaude() {
+    if (token.isEmpty) {
+      notify('Connect your job service in Options to talk to Claude.');
+      return;
+    }
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => ClaudePage(api: api)));
+  }
+
   Future<void> openCv(String uri) async {
     try {
       await Downloads.open(uri);
@@ -708,6 +719,11 @@ class _JobsHomeState extends State<JobsHome> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Talk to Claude',
+            onPressed: loading ? null : openClaude,
+            icon: const Icon(Icons.forum_outlined),
+          ),
           IconButton(
             tooltip: 'Download your CV',
             onPressed: savingCv ? null : downloadCv,

@@ -16,7 +16,7 @@ import threading
 import time
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT.parent / 'artifacts'
@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / 'vendor'))
 import adzuna_search as az
 import remote_search as remote
 import ai_pick as ai
+import claude_chat
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
 DEFAULTS = dict(preset='broad', adzuna=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
@@ -581,6 +582,7 @@ def download_name(path):
 
 class Handler(BaseHTTPRequestHandler):
     engine = Engine()
+    chats = claude_chat.ChatStore()
     token = ''
     def log_message(self, *args):
         pass
@@ -606,7 +608,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/health':
             self.respond(200, {'status': 'ok', 'adzuna_configured': bool(os.environ.get('ADZUNA_APP_ID') and os.environ.get('ADZUNA_APP_KEY')),
-                               'claude_available': ai.available()})
+                               'claude_available': ai.available(), 'claude_chat': claude_chat.enabled()})
         elif path == '/app':
             self.respond(200, app_release())
         elif path == '/applied':
@@ -622,6 +624,8 @@ class Handler(BaseHTTPRequestHandler):
             if cv is None:
                 return self.respond(404, {'error': missing})
             self.send_file(cv, 'application/pdf', missing, f'attachment; filename="{download_name(cv)}"')
+        elif path.startswith('/claude/'):
+            self.claude('GET', path)
         elif path.startswith('/search/'):
             run = self.engine.get(path.rsplit('/', 1)[1])
             self.respond(200 if run else 404, run or {'error': 'Search expired. Start a new search.'})
@@ -648,6 +652,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         path = urlparse(self.path).path
+        if path.startswith('/claude/'):
+            return self.claude('POST', path)
         if path not in ('/search', '/applied'):
             return self.respond(404, {'error': 'Not found'})
         try:
@@ -693,12 +699,61 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         path = urlparse(self.path).path
+        if path.startswith('/claude/'):
+            return self.claude('DELETE', path)
         if not path.startswith('/applied/'):
             return self.respond(404, {'error': 'Not found'})
         try:
             self.respond(200, {'removed': self.engine.applied.remove(path.rsplit('/', 1)[1])})
         except StoreError as exc:
             self.respond(500, {'error': str(exc)})
+    def read_json(self, limit):
+        size = int(self.headers.get('Content-Length', '0'))
+        if not 0 < size <= limit:
+            raise ValueError('Invalid request size.')
+        self.connection.settimeout(10)
+        body = json.loads(self.rfile.read(size))
+        if not isinstance(body, dict):
+            raise ValueError('Invalid request.')
+        return body
+    def claude(self, method, path):
+        """The Claude page: chats with Claude Code on this computer, in a folder the service offers."""
+        if not claude_chat.enabled():
+            return self.respond(403, {'error': 'The Claude page is switched off on the service (JOBS_CLAUDE_CHAT).'})
+        parts = path.strip('/').split('/')[1:]
+        chat_id = parts[1] if len(parts) > 1 else ''
+        missing = {'error': 'This chat is no longer on the service.'}
+        try:
+            if method == 'GET' and parts == ['folders']:
+                rows = claude_chat.folders()
+                return self.respond(200, {'folders': rows, 'default': rows[0]['path'] if rows else ''})
+            if method == 'GET' and parts == ['chats']:
+                return self.respond(200, {'chats': self.chats.list()})
+            if method == 'GET' and len(parts) == 2 and parts[0] == 'chats':
+                start = parse_qs(urlparse(self.path).query).get('from', ['0'])[0]
+                chat = self.chats.get(chat_id, int(start) if start.isdigit() else 0)
+                return self.respond(200 if chat else 404, {'chat': chat} if chat else missing)
+            if method == 'DELETE' and len(parts) == 2 and parts[0] == 'chats':
+                return self.respond(200, {'removed': self.chats.remove(chat_id)})
+            if method == 'POST' and parts == ['chats']:
+                body = self.read_json(131072)
+                return self.respond(202, {'chat': self.chats.create(body.get('cwd'), body.get('text'))})
+            if method == 'POST' and len(parts) == 3 and parts[0] == 'chats' and parts[2] == 'messages':
+                chat = self.chats.send(chat_id, self.read_json(131072).get('text'))
+                return self.respond(202 if chat else 404, {'chat': chat} if chat else missing)
+            if method == 'POST' and len(parts) == 3 and parts[0] == 'chats' and parts[2] == 'stop':
+                chat = self.chats.stop(chat_id)
+                return self.respond(200 if chat else 404, {'chat': chat} if chat else missing)
+            self.respond(404, {'error': 'Not found'})
+        except json.JSONDecodeError:
+            self.respond(400, {'error': 'Invalid request.'})
+        except ValueError as exc:
+            # ChatStore's messages are written for the app.
+            self.respond(400, {'error': str(exc)})
+        except RuntimeError as exc:
+            self.respond(409, {'error': str(exc)})
+        except claude_chat.ChatError as exc:
+            self.respond(503, {'error': str(exc)})
 
 
 def main():
