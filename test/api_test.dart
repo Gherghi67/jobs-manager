@@ -36,7 +36,31 @@ void main() {
         return http.Response('{"removed":true}', 200);
       }),
     );
-    expect(await api.request('/applied/one', delete: true), {'removed': true});
+    expect(await api.request('/applied/one', method: 'DELETE'), {
+      'removed': true,
+    });
+    api.close();
+  });
+  test('patch requests send a JSON body', () async {
+    final api = JobsApi(
+      'https://service.example',
+      'test-token',
+      client: MockClient((r) async {
+        expect(r.method, 'PATCH');
+        expect(jsonDecode(r.body), {'match': 'badge'});
+        return http.Response('{"job":{"match":"badge"}}', 200);
+      }),
+    );
+    expect(
+      await api.request(
+        '/applied/company-1',
+        body: {'match': 'badge'},
+        method: 'PATCH',
+      ),
+      {
+        'job': {'match': 'badge'},
+      },
+    );
     api.close();
   });
   test('authentication errors are actionable', () async {

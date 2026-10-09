@@ -25,7 +25,7 @@ class JobsApi {
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
-    bool delete = false,
+    String? method,
   }) async {
     final uri = _uri(path);
     final headers = {
@@ -34,13 +34,12 @@ class JobsApi {
     };
     final http.Response response;
     try {
-      response =
-          await (delete
-                  ? client.delete(uri, headers: headers)
-                  : body == null
-                  ? client.get(uri, headers: headers)
-                  : client.post(uri, headers: headers, body: jsonEncode(body)))
-              .timeout(const Duration(seconds: 20));
+      response = await (switch (method ?? (body == null ? 'GET' : 'POST')) {
+        'DELETE' => client.delete(uri, headers: headers),
+        'PATCH' => client.patch(uri, headers: headers, body: jsonEncode(body)),
+        'POST' => client.post(uri, headers: headers, body: jsonEncode(body)),
+        _ => client.get(uri, headers: headers),
+      }).timeout(const Duration(seconds: 20));
     } on TimeoutException {
       throw Exception(
         'The service at ${uri.origin} did not respond in time. Try again shortly.',

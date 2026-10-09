@@ -69,7 +69,12 @@ Tap the check icon on a card, or **Mark as applied** in a role's details, once y
 - A new listing counts as already applied when it has the same listing id, the same URL, or the same company and job title, on any board and in any location. Discover shows "Left out N roles you already applied to." after a search.
 - Marking a role as applied removes it from Saved and Dismissed. Marking needs the service; the phone keeps a copy of the list so the Applied tab still shows it offline.
 - The service stores each role's listing details, Claude's take, and up to 6,000 characters of its description, so you can still read it after the posting is taken down. The file is readable only by your user (0600). Set `JOBS_APPLIED_FILE` to keep it elsewhere.
-- Company entries hide every role at one company, whatever the title. Post `{"scope": "company", "company": "…", "title": "…", "applied_at": "<ISO date>", "note": "…"}` to `/applied`. Company names are compared without case, punctuation or legal suffixes, so "Proxify AB" matches "Proxify". The Applied tab shows them as "Every role at this company". On October 9, 2026, the 15 companies from the application confirmations in the personal Gmail (October 2–9) were imported this way.
+- Company entries cover one company. Post `{"scope": "company", "company": "…", "title": "…", "applied_at": "<ISO date>", "note": "…"}` to `/applied`. Company names are compared without case, punctuation or legal suffixes, so "Proxify AB" matches "Proxify". On October 9, 2026, the 15 companies from the application confirmations in the personal Gmail (October 2–9) were imported this way.
+- Each company entry has a `match` setting, changed with the **Hide all / Hide role / Badge** switch on its card in the Applied tab or with `PATCH /applied/<id>` `{"match": …}`:
+  - `company` (the default) hides every role at the company.
+  - `role` hides only roles with the entry's title. It needs a title, and suits aggregators such as Jobgether, which post for many employers.
+  - `badge` keeps the company's roles visible with an "Applied at … · date" pill and puts them after all other roles. It suits talent pools such as Proxify, where you are already in their pipeline but still want to see good matches.
+- Listings from searches before this change carry no company tag, so company entries take effect on them after the next search.
 - `GET /applied` lists them, `POST /applied` adds a role, and `DELETE /applied/<id>` removes one. All three need the access token.
 
 ## Options and behavior

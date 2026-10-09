@@ -75,12 +75,24 @@ String aiSummary(Map<String, dynamic> status) {
   return note.isEmpty ? line : '$line $note';
 }
 
+String appliedDate(String isoDate) =>
+    DateTime.tryParse(isoDate)?.toLocal().toString().split(' ').first ?? '';
+
 String appliedLabel(String isoDate) {
-  final date = DateTime.tryParse(isoDate)?.toLocal();
-  return date == null
-      ? 'Applied'
-      : 'Applied ${date.toString().split(' ').first}';
+  final date = appliedDate(isoDate);
+  return date.isEmpty ? 'Applied' : 'Applied $date';
 }
+
+// Same normalisation as the service's title_key.
+String titleKey(String title) =>
+    title.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+// What a company entry does in searches.
+String matchSummary(String match) => switch (match) {
+  'role' => 'Searches hide only this role',
+  'badge' => 'Searches show roles here with a badge',
+  _ => 'Searches hide every role here',
+};
 
 class Job {
   final Map<String, dynamic> data;
@@ -91,8 +103,9 @@ class Job {
       List<String>.from(data['sources'] ?? [data['source']]);
   List<String> get matches => List<String>.from(data['matched']?['core'] ?? []);
   bool get eligible => ['worldwide', 'europe'].contains(text('eligibility'));
-  // An entry from an application email: it covers every role at the company.
+  // An entry from an application email, for a whole company; see [match].
   bool get companyWide => data['scope'] == 'company';
+  String get match => (data['match'] ?? 'company').toString();
   Map<String, dynamic>? get ai =>
       data['ai'] is Map ? Map<String, dynamic>.from(data['ai'] as Map) : null;
   List<String> aiList(String key) => List<String>.from(ai?[key] ?? []);

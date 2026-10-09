@@ -120,6 +120,40 @@ class AppliedTests(unittest.TestCase):
         self.assertEqual([j['company'] for j in kept], ['Studios United'])
         self.assertEqual(hidden, 2)
 
+    def rows(self):
+        return s.rank([job(url='https://example.com/a'), job(title='Senior Python Engineer', description='Python backend', url='https://example.com/b'),
+                       job(company='Other', url='https://example.com/c')], s.validate_options({}))
+
+    def test_role_match_hides_only_the_named_roles(self):
+        entry = self.store.add({'scope': 'company', 'company': 'Studio', 'title': 'Senior TypeScript Backend Engineer'})
+        self.assertEqual(self.store.set_match(entry['id'], 'role')['match'], 'role')
+        kept, hidden = self.store.exclude(self.rows())
+        self.assertEqual(sorted(j['title'] for j in kept), ['Senior Python Engineer', 'Senior TypeScript Backend Engineer'])
+        self.assertEqual([j['company'] for j in kept if j['title'] == 'Senior TypeScript Backend Engineer'], ['Other'])
+        self.assertEqual(hidden, 1)
+
+    def test_badge_match_marks_roles_and_puts_them_last(self):
+        entry = self.store.add({'scope': 'company', 'company': 'Studio AB', 'applied_at': '2026-10-07T18:10:28Z', 'match': 'badge'})
+        kept, hidden = self.store.exclude(self.rows())
+        self.assertEqual(hidden, 0)
+        self.assertEqual([j['company'] for j in kept], ['Other', 'Studio', 'Studio'])
+        self.assertEqual(kept[-1]['applied_badge'], {'company': 'Studio AB', 'applied_at': '2026-10-07T18:10:28Z'})
+        self.assertNotIn('applied_badge', kept[0])
+        self.assertEqual(s.AppliedStore(self.path).list()[0]['match'], 'badge')
+        self.assertEqual(self.store.set_match(entry['id'], 'company')['match'], 'company')
+        self.assertEqual([j['company'] for j in self.store.exclude(self.rows())[0]], ['Other'])
+
+    def test_match_changes_validated(self):
+        untitled = self.store.add({'scope': 'company', 'company': 'Studio'})
+        listing = self.store.add(self.job)
+        for match in ('role', 'everything', None):
+            with self.subTest(match=match), self.assertRaises(ValueError):
+                self.store.set_match(untitled['id'], match)
+        self.assertIsNone(self.store.set_match(listing['id'], 'badge'))
+        self.assertIsNone(self.store.set_match('missing', 'badge'))
+        with self.assertRaises(ValueError):
+            self.store.add({'scope': 'company', 'company': 'New', 'match': 'role'})
+
     def test_company_entries_validated(self):
         for bad in [{'scope': 'company'}, {'scope': 'company', 'company': ' . '}, {'scope': 'company', 'company': 'X', 'applied_at': 'last week'}]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -158,6 +192,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(seen, ['Fresh'])
         self.assertEqual([j['company'] for j in result['jobs']], ['Fresh'])
         self.assertEqual(result['applied_hidden'], 1)
+
+    def test_badged_roles_stay_last_after_claude(self):
+        engine = s.Engine(self.store())
+        engine.applied.add({'scope': 'company', 'company': 'Studio', 'match': 'badge'})
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
+        engine.runs['x'] = {}
+        def pick(jobs, o, cache):
+            # Claude puts the badged role first; the service moves it back down.
+            return sorted(jobs, key=lambda j: j['company'] != 'Studio'), dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job(), job(company='Fresh', url='https://example.com/fresh')]}), patch.object(s.ai, 'pick', pick):
+            engine.run('x', o)
+        result = engine.get('x')
+        self.assertEqual([j['company'] for j in result['jobs']], ['Fresh', 'Studio'])
+        self.assertEqual(result['jobs'][1]['applied_badge']['company'], 'Studio')
+        self.assertEqual(result['applied_hidden'], 0)
 
     def test_partial_failure_keeps_working_source(self):
         engine = s.Engine(self.store())
@@ -220,6 +269,17 @@ class ApiTests(unittest.TestCase):
             with self.subTest(method=method), self.assertRaises(HTTPError) as e:
                 self.call(method, path, token=False)
             self.assertEqual(e.exception.code, 401)
+        entry = self.call('POST', '/applied', {'scope': 'company', 'company': 'Proxify AB'})['job']
+        self.assertEqual(self.call('PATCH', '/applied/' + entry['id'], {'match': 'badge'})['job']['match'], 'badge')
+        for path, body, code in [('/applied/' + entry['id'], {'match': 'role'}, 400), ('/applied/missing', {'match': 'badge'}, 404),
+                                 ('/applied/' + row['id'], {'match': 'badge'}, 404)]:
+            with self.subTest(path=path, body=body), self.assertRaises(HTTPError) as e:
+                self.call('PATCH', path, body)
+            self.assertEqual(e.exception.code, code)
+        with self.assertRaises(HTTPError) as e:
+            self.call('PATCH', '/applied/' + entry['id'], {'match': 'company'}, token=False)
+        self.assertEqual(e.exception.code, 401)
+        self.assertEqual(self.call('DELETE', '/applied/' + entry['id']), {'removed': True})
         self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': True})
         self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': False})
         self.assertEqual(self.call('GET', '/applied'), {'jobs': []})

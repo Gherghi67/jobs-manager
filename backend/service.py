@@ -166,11 +166,23 @@ def company_key(name):
     return ' '.join(words)
 
 
+# What a company entry does in searches: hide every role, hide only its titled roles, or show roles with a badge.
+MATCHES = ('company', 'role', 'badge')
+
+
+def title_key(title):
+    return re.sub(r'[^a-z0-9]+', ' ', str(title or '').lower()).strip()
+
+
 def applied_keys(job):
     """A role counts as applied by listing id, by URL, or by company and title across boards and locations.
-    A company entry (from an application email) covers every role at that company."""
+    A company entry (from an application email) covers every role at that company, only its titled roles,
+    or none (a badge entry marks roles instead of hiding them)."""
     if job.get('scope') == 'company':
-        return {'company:' + company_key(job.get('company'))}
+        key, match = company_key(job.get('company')), job.get('match', 'company')
+        if match == 'role':
+            return {f'crole:{key}|{title_key(t)}' for t in str(job.get('title') or '').split('; ') if title_key(t)}
+        return {'company:' + key} if match == 'company' else set()
     keys = {'id:' + str(job.get('id', ''))}
     url = re.sub(r'^https?://(?:www\.)?', '', str(job.get('url', '')).split('#')[0].strip().lower()).rstrip('/')
     if url:
@@ -237,7 +249,8 @@ class AppliedStore:
         key = company_key(company)
         record = dict(id='company-' + hashlib.sha256(key.encode()).hexdigest()[:20], scope='company', company=company.strip(),
                       company_key=key, title=str(entry.get('title') or '')[:300], source=str(entry.get('source') or 'email')[:40],
-                      note=str(entry.get('note') or '')[:500], applied_at=str(applied_at))
+                      note=str(entry.get('note') or '')[:500], applied_at=str(applied_at), match=entry.get('match', 'company'))
+        self.check_match(record)
         with self.lock:
             jobs = self.load()
             existing = jobs.get(record['id'])
@@ -251,6 +264,24 @@ class AppliedStore:
             self.save()
             return copy.deepcopy(jobs[record['id']])
 
+    @staticmethod
+    def check_match(entry):
+        if entry['match'] not in MATCHES:
+            raise ValueError('Unknown match.')
+        if entry['match'] == 'role' and not title_key(entry['title']):
+            raise ValueError('Hiding by role needs a role title.')
+
+    def set_match(self, entry_id, match):
+        """Changes what a company entry does in searches. Returns the entry, or None if there is no such company entry."""
+        with self.lock:
+            entry = self.load().get(entry_id)
+            if entry is None or entry.get('scope') != 'company':
+                return None
+            self.check_match(dict(entry, match=match))
+            entry['match'] = match
+            self.save()
+            return copy.deepcopy(entry)
+
     def remove(self, job_id):
         with self.lock:
             jobs = self.load()
@@ -261,11 +292,24 @@ class AppliedStore:
             return True
 
     def exclude(self, jobs):
-        """Drops roles the user already applied to. Returns (kept, hidden count)."""
+        """Drops roles the user already applied to and marks roles at badge companies, which go last.
+        Returns (kept, hidden count)."""
         with self.lock:
-            keys = set().union(*(applied_keys(j) for j in self.load().values()))
-        kept = [j for j in jobs if not (applied_keys(j) | ({'company:' + j['company_key']} if j.get('company_key') else set())) & keys]
-        return kept, len(jobs) - len(kept)
+            records = copy.deepcopy(list(self.load().values()))
+        keys = set().union(*(applied_keys(r) for r in records))
+        badges = {company_key(r['company']): r for r in records if r.get('scope') == 'company' and r.get('match') == 'badge'}
+        kept, marked = [], []
+        for j in jobs:
+            ck = j.get('company_key', '')
+            listing = applied_keys(j) | ({'company:' + ck, f'crole:{ck}|{title_key(j.get("title"))}'} if ck else set())
+            if listing & keys:
+                continue
+            if ck in badges:
+                j['applied_badge'] = dict(company=badges[ck]['company'], applied_at=badges[ck]['applied_at'])
+                marked.append(j)
+            else:
+                kept.append(j)
+        return kept + marked, len(jobs) - len(kept) - len(marked)
 
 
 class Engine:
@@ -380,6 +424,8 @@ class Engine:
                 try:
                     # Work on a copy: polling threads deep-copy the published run state.
                     jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache)
+                    # Roles at companies already applied to stay below the rest, even when Claude ranked them.
+                    jobs.sort(key=lambda j: 'applied_badge' in j)
                 except ai.AIError as exc:
                     status = dict(status='error', message=str(exc))
                 except Exception as exc:
@@ -489,6 +535,28 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(400, {'error': 'Invalid search options.' if path == '/search' else 'Invalid job.'})
         except RuntimeError as exc:
             self.respond(409, {'error': str(exc)})
+        except StoreError as exc:
+            self.respond(500, {'error': str(exc)})
+    def do_PATCH(self):
+        if not self.authorized():
+            return
+        path = urlparse(self.path).path
+        if not path.startswith('/applied/'):
+            return self.respond(404, {'error': 'Not found'})
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+            if not 0 < size <= 1024:
+                raise ValueError('Invalid request size.')
+            self.connection.settimeout(10)
+            body = json.loads(self.rfile.read(size))
+        except (ValueError, TypeError):
+            return self.respond(400, {'error': 'Invalid change.'})
+        try:
+            entry = self.engine.applied.set_match(path.rsplit('/', 1)[1], body.get('match') if isinstance(body, dict) else None)
+            self.respond(200 if entry else 404, {'job': entry} if entry else {'error': 'No such company entry.'})
+        except ValueError as exc:
+            # set_match's messages are written for the app.
+            self.respond(400, {'error': str(exc)})
         except StoreError as exc:
             self.respond(500, {'error': str(exc)})
     def do_DELETE(self):

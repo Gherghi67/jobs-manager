@@ -395,12 +395,135 @@ void main() {
     expect(find.text('Acme'), findsNothing);
     await tester.tap(find.text('Applied').last);
     await tester.pumpAndSettle();
-    expect(find.text('Every role at this company'), findsOneWidget);
+    expect(find.text('Company application'), findsOneWidget);
     expect(find.text('Thank you for applying to Acme'), findsOneWidget);
     expect(
       find.text(
         'Applied 2026-10-02 · From your email · Searches hide every role here',
       ),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('role and badge entries hide one role or mark a company', (
+    tester,
+  ) async {
+    Map<String, dynamic> listing(String id, String company, String title) => {
+      'id': id,
+      'title': title,
+      'company': company,
+      'company_key': company.toLowerCase(),
+      'location': 'Europe',
+      'eligibility': 'europe',
+      'type': 'contract',
+      'score': 10,
+      'sources': ['remotive'],
+      'matched': {
+        'core': ['python'],
+      },
+      'description': 'APIs.',
+      'url': 'https://example.com/$id',
+    };
+    Map<String, dynamic> entry(
+      String id,
+      String company,
+      String title,
+      String match, [
+      String appliedAt = '2026-10-07T18:10:28Z',
+    ]) => {
+      'id': id,
+      'scope': 'company',
+      'company': company,
+      'company_key': company.toLowerCase(),
+      'title': title,
+      'note': 'Thanks for applying',
+      'applied_at': appliedAt,
+      'match': match,
+    };
+    final patches = <String>[];
+    final client = MockClient((r) async {
+      if (r.method == 'PATCH') {
+        final match = (jsonDecode(r.body) as Map)['match'] as String;
+        patches.add('${r.url.path} $match');
+        return http.Response(
+          jsonEncode({'job': entry('company-p', 'Proxify', '', match)}),
+          200,
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'jobs': [
+            entry('company-p', 'Proxify', '', 'badge'),
+            entry(
+              'company-j',
+              'Jobgether',
+              'Go Engineer',
+              'role',
+              '2026-10-02T09:00:00Z',
+            ),
+          ],
+        }),
+        200,
+      );
+    });
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([
+        listing('a', 'Proxify', 'Node Developer'),
+        listing('b', 'Jobgether', 'Go Engineer'),
+        listing('c', 'Jobgether', 'Python Engineer'),
+        listing('d', 'Other', 'Data Engineer'),
+      ]),
+      'updated': '2026-10-09T10:00:00Z',
+      'url': 'https://service.example',
+      'token': 'test-token',
+    });
+    await tester.pumpWidget(JobsApp(httpClient: () => client));
+    await tester.pumpAndSettle();
+    final list = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.text('3 opportunities'),
+      200,
+      scrollable: list,
+    );
+    await tester.scrollUntilVisible(
+      find.text('Node Developer'),
+      200,
+      scrollable: list,
+    );
+    expect(find.text('Go Engineer'), findsNothing);
+    expect(find.text('Applied at Proxify · 2026-10-07'), findsOneWidget);
+    // The badged Proxify role is listed after the others.
+    expect(
+      tester.getTopLeft(find.text('Node Developer')).dy,
+      greaterThan(tester.getTopLeft(find.text('Data Engineer')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('Python Engineer')).dy,
+      lessThan(tester.getTopLeft(find.text('Node Developer')).dy),
+    );
+
+    await tester.tap(find.text('Applied').last);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('2 applied roles'),
+      -200,
+      scrollable: list,
+    );
+    expect(find.text('2 applied roles'), findsOneWidget);
+    expect(find.textContaining('Searches hide only this role'), findsOneWidget);
+    // Proxify was applied to later, so its card comes first.
+    final hideAll = find.text('Hide all').first;
+    await tester.scrollUntilVisible(hideAll, 200, scrollable: list);
+    expect(
+      find.textContaining('Searches show roles here with a badge'),
+      findsOneWidget,
+    );
+    await tester.tap(hideAll);
+    await tester.pumpAndSettle();
+    expect(patches, ['/applied/company-p company']);
+    expect(
+      find.textContaining('Searches hide every role here'),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);

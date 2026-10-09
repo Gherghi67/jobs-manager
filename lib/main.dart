@@ -331,7 +331,7 @@ class _JobsHomeState extends State<JobsHome> {
       final result = undo
           ? await api.request(
               '/applied/${Uri.encodeComponent(j.id)}',
-              delete: true,
+              method: 'DELETE',
             )
           : await api.request(
               '/applied',
@@ -378,6 +378,48 @@ class _JobsHomeState extends State<JobsHome> {
       }
     }
   }
+
+  Future<void> setMatch(Job j, String match) async {
+    if (applying.contains(j.id) || match == j.match) {
+      return;
+    }
+    final api = this.api();
+    setState(() {
+      applying.add(j.id);
+    });
+    try {
+      final result = await api.request(
+        '/applied/${Uri.encodeComponent(j.id)}',
+        body: {'match': match},
+        method: 'PATCH',
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        appliedVersion++;
+        applied[j.id] = Map<String, dynamic>.from(result['job'] as Map);
+      });
+      unawaited(persist());
+    } catch (e) {
+      notify(
+        'Could not change it. ${e.toString().replaceFirst('Exception: ', '')}',
+      );
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          applying.remove(j.id);
+        });
+      }
+    }
+  }
+
+  // Company entries (from application emails) that do [match] in searches.
+  Iterable<Map> companyEntries(String match) =>
+      applied.values.cast<Map>().where(
+        (a) => a['scope'] == 'company' && (a['match'] ?? 'company') == match,
+      );
 
   Future<void> openLink(String url) async {
     final uri = Uri.tryParse(url);
@@ -510,18 +552,29 @@ class _JobsHomeState extends State<JobsHome> {
           ),
       _ => jobs,
     };
-    final appliedCompanies = {
-      for (final a in applied.values)
-        if ((a as Map)['scope'] == 'company') a['company_key'],
+    final hiddenCompanies = {
+      for (final a in companyEntries('company')) a['company_key'],
     };
-    final visible = pool
+    final hiddenRoles = {
+      for (final a in companyEntries('role'))
+        for (final t in a['title'].toString().split('; '))
+          '${a['company_key']}|${titleKey(t)}',
+    };
+    final badges = {
+      for (final a in companyEntries('badge')) a['company_key']: a,
+    };
+    bool badged(Job j) => tab != 2 && badges.containsKey(j.data['company_key']);
+    final matching = pool
         .where(
           (j) =>
               switch (tab) {
                 0 =>
                   !dismissed.contains(j.id) &&
                       !applied.containsKey(j.id) &&
-                      !appliedCompanies.contains(j.data['company_key']),
+                      !hiddenCompanies.contains(j.data['company_key']) &&
+                      !hiddenRoles.contains(
+                        '${j.data['company_key']}|${titleKey(j.text('title'))}',
+                      ),
                 3 => dismissed.contains(j.id),
                 _ => true,
               } &&
@@ -530,6 +583,11 @@ class _JobsHomeState extends State<JobsHome> {
                   .contains(filter.toLowerCase()),
         )
         .toList();
+    // Roles at companies already applied to (badge entries) go last.
+    final visible = [
+      ...matching.where((j) => !badged(j)),
+      ...matching.where(badged),
+    ];
     return Scaffold(
       appBar: AppBar(
         title: const Row(
@@ -917,7 +975,7 @@ class _JobsHomeState extends State<JobsHome> {
                                 ),
                                 Text(
                                   j.companyWide && j.text('title').isEmpty
-                                      ? 'Every role at this company'
+                                      ? 'Company application'
                                       : j.text('title'),
                                   style: const TextStyle(
                                     fontSize: 20,
@@ -933,6 +991,32 @@ class _JobsHomeState extends State<JobsHome> {
                                       color: Colors.black54,
                                     ),
                                   ),
+                                  const SizedBox(height: 12),
+                                  SegmentedButton<String>(
+                                    showSelectedIcon: false,
+                                    style: const ButtonStyle(
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                    segments: [
+                                      const ButtonSegment(
+                                        value: 'company',
+                                        label: Text('Hide all'),
+                                      ),
+                                      ButtonSegment(
+                                        value: 'role',
+                                        label: const Text('Hide role'),
+                                        enabled: j.text('title').isNotEmpty,
+                                      ),
+                                      const ButtonSegment(
+                                        value: 'badge',
+                                        label: Text('Badge'),
+                                      ),
+                                    ],
+                                    selected: {j.match},
+                                    onSelectionChanged: applying.contains(j.id)
+                                        ? null
+                                        : (v) => setMatch(j, v.first),
+                                  ),
                                 ] else ...[
                                   const SizedBox(height: 10),
                                   Text(
@@ -946,6 +1030,11 @@ class _JobsHomeState extends State<JobsHome> {
                                     spacing: 6,
                                     runSpacing: 6,
                                     children: [
+                                      if (badged(j))
+                                        pill(
+                                          'Applied at ${badges[j.data['company_key']]!['company']} · ${appliedDate(badges[j.data['company_key']]!['applied_at'].toString())}',
+                                          false,
+                                        ),
                                       if (j.ai != null)
                                         pill(
                                           'Claude ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
@@ -989,7 +1078,7 @@ class _JobsHomeState extends State<JobsHome> {
                                     Expanded(
                                       child: Text(
                                         j.companyWide
-                                            ? '${appliedLabel(j.text('applied_at'))} · From your email · Searches hide every role here'
+                                            ? '${appliedLabel(j.text('applied_at'))} · From your email · ${matchSummary(j.match)}'
                                             : '${tab == 2 ? '${appliedLabel(j.text('applied_at'))} · ' : ''}Jobs by ${j.sources.map(sourceName).join(', ')}',
                                         style: const TextStyle(
                                           fontSize: 11,
