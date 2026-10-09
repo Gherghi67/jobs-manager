@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:jobs_manager/api.dart';
+import 'package:jobs_manager/updater.dart';
 
 void main() {
   test('search sends options and bearer token', () async {
@@ -99,5 +101,89 @@ void main() {
     expect(JobsApi.validUrl('https://user:password@example.com'), false);
     expect(JobsApi.validUrl('https://example.com?key=secret'), false);
     expect(JobsApi.validUrl('https://jobs.example.com'), true);
+  });
+
+  test(
+    'download streams the build with the token and reports progress',
+    () async {
+      final bytes = List<int>.generate(70000, (i) => i % 251);
+      final folder = await Directory.systemTemp.createTemp('fieldwork');
+      addTearDown(() => folder.delete(recursive: true));
+      final api = JobsApi(
+        'https://mac.tailnet.ts.net',
+        'test-token',
+        client: MockClient.streaming((r, _) async {
+          expect(r.url.path, '/app/fieldwork.apk');
+          expect(r.headers['Authorization'], 'Bearer test-token');
+          return http.StreamedResponse(
+            Stream.fromIterable([
+              bytes.sublist(0, 30000),
+              bytes.sublist(30000),
+            ]),
+            200,
+            contentLength: bytes.length,
+          );
+        }),
+      );
+      final progress = <int>[];
+      final file = File('${folder.path}/update.apk');
+      await api.download(
+        '/app/fieldwork.apk',
+        file,
+        onProgress: (received, total) {
+          expect(total, bytes.length);
+          progress.add(received);
+        },
+      );
+      expect(progress, [30000, 70000]);
+      expect(await file.readAsBytes(), bytes);
+      api.close();
+    },
+  );
+  test('download failures are readable', () async {
+    final folder = await Directory.systemTemp.createTemp('fieldwork');
+    addTearDown(() => folder.delete(recursive: true));
+    final file = File('${folder.path}/update.apk');
+    final missing = JobsApi(
+      'http://127.0.0.1:8765',
+      't',
+      client: MockClient((_) async => http.Response('{}', 404)),
+    );
+    await expectLater(
+      missing.download('/app/fieldwork.apk', file),
+      throwsA(predicate((e) => e.toString().contains('HTTP 404'))),
+    );
+    final short = JobsApi(
+      'http://127.0.0.1:8765',
+      't',
+      client: MockClient.streaming(
+        (_, _) async => http.StreamedResponse(
+          Stream.value([1, 2, 3]),
+          200,
+          contentLength: 10,
+        ),
+      ),
+    );
+    await expectLater(
+      short.download('/app/fieldwork.apk', file),
+      throwsA(predicate((e) => e.toString().contains('incomplete'))),
+    );
+  });
+  test('only a newer published build counts as an update', () {
+    final installed = {'versionCode': 29700000, 'versionName': '1.0.0'};
+    expect(
+      isNewer(installed, {'available': true, 'version_code': 29700001}),
+      isTrue,
+    );
+    expect(
+      isNewer(installed, {'available': true, 'version_code': 29700000}),
+      isFalse,
+    );
+    expect(isNewer(installed, {'available': false}), isFalse);
+    expect(
+      isNewer(installed, {'available': true, 'version_code': 'x'}),
+      isFalse,
+    );
+    expect(buildLabel(installed), 'Fieldwork 1.0.0 (build 29700000)');
   });
 }

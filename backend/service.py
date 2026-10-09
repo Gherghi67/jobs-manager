@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -17,14 +18,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
+APP_DIR = ROOT.parent / 'artifacts'
 sys.path.insert(0, str(ROOT / 'vendor'))
 import adzuna_search as az
 import remote_search as remote
+import ai_pick as ai
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
 DEFAULTS = dict(preset='broad', adzuna=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
                 keywords='', remote_only=True, eligibility='romania', contract_only=False,
-                prefer_contract=True, max_age_days=30)
+                prefer_contract=True, max_age_days=30, ai_pick=True)
 
 
 def config(name):
@@ -40,7 +43,7 @@ def validate_options(value):
     o.update(value)
     if o['preset'] not in ('backend', 'broad', 'gaming'):
         raise ValueError('Unknown preset.')
-    for key in ('adzuna', 'remote_only', 'contract_only', 'prefer_contract'):
+    for key in ('adzuna', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
         if type(o[key]) is not bool:
             raise ValueError(f'{key} must be true or false.')
     if not isinstance(o['boards'], list) or any(x not in PUBLIC_SOURCES for x in o['boards']):
@@ -147,6 +150,7 @@ class Engine:
         self.lock = threading.Lock()
         self.runs = {}
         self.cache = {}
+        self.ai_cache = {}
 
     def start(self, options):
         o = validate_options(options)
@@ -207,7 +211,7 @@ class Engine:
         return rows, failures
 
     def run(self, key, o):
-        raw, statuses = [], []
+        raw, statuses, jobs = [], [], []
         try:
             c = search_config(o)
             plans = [('adzuna', None)] if o['adzuna'] else []
@@ -243,10 +247,44 @@ class Engine:
                     # Never expose upstream URLs that could contain API keys.
                     message = str(exc) if name == 'adzuna' and isinstance(exc, ValueError) else f'{type(exc).__name__}: source unavailable; other sources continue.'
                     statuses.append(dict(name=name, status='error', count=0, cached=False, message=message))
-                self.update(key, jobs=rank(raw, o), sources=copy.deepcopy(statuses), fetched=len(raw))
+                jobs = rank(raw, o)
+                self.update(key, jobs=jobs, sources=copy.deepcopy(statuses), fetched=len(raw))
+            if o['ai_pick'] and jobs:
+                count = min(len(jobs), ai.LIMIT)
+                self.update(key, current=f'Claude is ranking {count} role{"" if count == 1 else "s"}', source=None)
+                try:
+                    # Work on a copy: polling threads deep-copy the published run state.
+                    jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache)
+                except ai.AIError as exc:
+                    status = dict(status='error', message=str(exc))
+                except Exception as exc:
+                    status = dict(status='error', message=f'{type(exc).__name__}: Claude ranking failed; keyword ranking shown.')
+                self.update(key, jobs=jobs, ai=status)
             self.update(key, status='complete', current='Search complete', updated_at=dt.datetime.now(dt.timezone.utc).isoformat())
         except Exception:
             self.update(key, status='error', current='Search failed. Please retry.')
+
+
+def app_release():
+    """The APK published by scripts/build_apk.sh, for in-app updates."""
+    apk, meta = APP_DIR / 'fieldwork.apk', APP_DIR / 'fieldwork.json'
+    try:
+        info = json.loads(meta.read_text())
+        stat = apk.stat()
+    except (OSError, ValueError):
+        return {'available': False}
+    key = (stat.st_mtime_ns, stat.st_size)
+    if app_release.cached[0] != key:
+        digest = hashlib.sha256()
+        with apk.open('rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                digest.update(block)
+        app_release.cached = (key, digest.hexdigest())
+    if type(info.get('version_code')) is not int:
+        return {'available': False}
+    return {'available': True, 'version_code': info['version_code'], 'version_name': str(info.get('version_name', '')),
+            'size': stat.st_size, 'sha256': app_release.cached[1]}
+app_release.cached = (None, '')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -275,12 +313,32 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == '/health':
-            self.respond(200, {'status': 'ok', 'adzuna_configured': bool(os.environ.get('ADZUNA_APP_ID') and os.environ.get('ADZUNA_APP_KEY'))})
+            self.respond(200, {'status': 'ok', 'adzuna_configured': bool(os.environ.get('ADZUNA_APP_ID') and os.environ.get('ADZUNA_APP_KEY')),
+                               'claude_available': ai.available()})
+        elif path == '/app':
+            self.respond(200, app_release())
+        elif path == '/app/fieldwork.apk':
+            self.send_apk()
         elif path.startswith('/search/'):
             run = self.engine.get(path.rsplit('/', 1)[1])
             self.respond(200 if run else 404, run or {'error': 'Search expired. Start a new search.'})
         else:
             self.respond(404, {'error': 'Not found'})
+    def send_apk(self):
+        try:
+            f = (APP_DIR / 'fieldwork.apk').open('rb')
+        except OSError:
+            return self.respond(404, {'error': 'No app build is published on the service.'})
+        with f:
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/vnd.android.package-archive')
+            self.send_header('Content-Length', str(os.fstat(f.fileno()).st_size))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            try:
+                shutil.copyfileobj(f, self.wfile)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
     def do_POST(self):
         if not self.authorized():
             return

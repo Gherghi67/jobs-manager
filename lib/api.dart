@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -25,10 +26,7 @@ class JobsApi {
     String path, {
     Map<String, dynamic>? body,
   }) async {
-    if (!validUrl(baseUrl)) {
-      throw Exception('Enter a valid service URL in Options.');
-    }
-    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}$path');
+    final uri = _uri(path);
     final headers = {
       'Authorization': 'Bearer $token',
       'Content-Type': 'application/json',
@@ -45,10 +43,7 @@ class JobsApi {
         'The service at ${uri.origin} did not respond in time. Try again shortly.',
       );
     } on http.ClientException {
-      final local = ['127.0.0.1', 'localhost'].contains(uri.host);
-      throw Exception(
-        'Cannot reach the service at ${uri.origin}. ${local ? 'Check that scripts/serve.sh is running and, for a USB phone, that adb reverse tcp:8765 tcp:8765 is active.' : 'Check that the service is running and the URL is correct.'}',
-      );
+      throw _unreachable(uri);
     }
     final Map<String, dynamic> result;
     try {
@@ -64,6 +59,65 @@ class JobsApi {
       );
     }
     return result;
+  }
+
+  // Streams a large file, such as an app build, to [target].
+  Future<void> download(
+    String path,
+    File target, {
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final uri = _uri(path);
+    final request = http.Request('GET', uri)
+      ..headers['Authorization'] = 'Bearer $token';
+    final http.StreamedResponse response;
+    try {
+      response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 20));
+    } on TimeoutException {
+      throw Exception('The service at ${uri.origin} did not respond in time.');
+    } on http.ClientException {
+      throw _unreachable(uri);
+    }
+    if (response.statusCode != 200) {
+      throw Exception('Download failed (HTTP ${response.statusCode}).');
+    }
+    final total = response.contentLength ?? 0;
+    final sink = target.openWrite();
+    var received = 0;
+    try {
+      await for (final chunk in response.stream.timeout(
+        const Duration(seconds: 30),
+      )) {
+        sink.add(chunk);
+        received += chunk.length;
+        onProgress?.call(received, total);
+      }
+    } on TimeoutException {
+      throw Exception('The download stalled. Try again.');
+    } on http.ClientException {
+      throw Exception('The download was interrupted. Try again.');
+    } finally {
+      await sink.close();
+    }
+    if (total > 0 && received != total) {
+      throw Exception('The download was incomplete. Try again.');
+    }
+  }
+
+  Uri _uri(String path) {
+    if (!validUrl(baseUrl)) {
+      throw Exception('Enter a valid service URL in Options.');
+    }
+    return Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}$path');
+  }
+
+  Exception _unreachable(Uri uri) {
+    final local = ['127.0.0.1', 'localhost'].contains(uri.host);
+    return Exception(
+      'Cannot reach the service at ${uri.origin}. ${local ? 'Check that scripts/serve.sh is running and, for a USB phone, that adb reverse tcp:8765 tcp:8765 is active.' : 'Check that the service is running and the URL is correct.'}',
+    );
   }
 
   void close() => client.close();

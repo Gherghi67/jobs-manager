@@ -12,7 +12,7 @@ The app uses a small Python service on your computer. Keep that service running 
    ```sh
    ./scripts/serve.sh
    ```
-   Python 3.10+ is required; there are no third-party Python dependencies. The launcher uses `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` from the environment, or retrieves those exact names from the `wap-ags` secret store documented in cv-refactor. Override the store with `JOBS_SECRETS_SESSION`. Missing credentials leave Adzuna visibly unavailable while remote boards continue.
+   Python 3.10+ is required; there are no third-party Python dependencies. The launcher uses `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` from the environment, or retrieves those exact names from the `wap-ags` secret store documented in cv-refactor. Override the store with `JOBS_SECRETS_SESSION`. Missing credentials leave Adzuna visibly unavailable while remote boards continue. On macOS the launcher runs `caffeinate` for as long as the service is up, so the Mac does not idle-sleep; locking the screen is fine, but closing a MacBook lid still sleeps it unless it is on power with an external display.
 2. Connect an Android phone by USB with USB debugging enabled, then run:
    ```sh
    adb install -r artifacts/fieldwork.apk
@@ -25,7 +25,42 @@ The app uses a small Python service on your computer. Keep that service running 
    ```
 4. Tap **Test connection**, then **Save options → Find opportunities**.
 
-For an emulator, the same `adb reverse` works, or use `http://10.0.2.2:8765`. For untethered use, deploy the service behind HTTPS and enter that URL. Hosting is not provisioned by this project. HTTP is allowed only for localhost and the emulator host; arbitrary LAN HTTP is intentionally not enabled. The default service binds only to localhost. An HTTPS reverse proxy can forward to it. `JOBS_ACCESS_TOKEN` can supply a persistent token instead of the local file.
+For an emulator, the same `adb reverse` works, or use `http://10.0.2.2:8765`. HTTP is allowed only for localhost and the emulator host; arbitrary LAN HTTP is intentionally not enabled. The default service binds only to localhost. `JOBS_ACCESS_TOKEN` can supply a persistent token instead of the local file.
+
+### Without the cable (Tailscale Serve)
+
+Tailscale Serve gives the Mac's service a private HTTPS address that only your own Tailscale devices can reach. The app needs no changes, but the Mac must be awake and running `./scripts/serve.sh` for new searches.
+
+1. Install Tailscale on the Mac (`brew install --cask tailscale-app` or the Mac App Store) and on the phone (Google Play), and sign in to the same account on both.
+2. In the Tailscale admin console under **DNS**, enable MagicDNS and HTTPS Certificates. `tailscale serve` prints a link to this page if it is still off.
+3. On the Mac, publish the service once. The setting survives restarts:
+   ```sh
+   tailscale serve --bg 8765
+   ```
+   With the app-store or standalone Mac app, the CLI is `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. `tailscale serve status` shows the address, `https://<mac-name>.<tailnet>.ts.net`; `tailscale serve reset` removes it. Do not use `tailscale funnel`, which makes the service public.
+4. In **Fieldwork → Options**, set the service URL to that `https://….ts.net` address, keep the same token, and tap **Test connection**. Tailscale must be connected on the phone.
+
+## App updates
+
+**Options → App updates → Check for app update** asks the service for the build in `artifacts/fieldwork.apk`. If that build is newer than the installed one, **Install build N** downloads it with the access token, checks its SHA-256 against the service, and hands it to Android's package installer. Confirm Android's "update this app" dialog, then open Fieldwork again. Saved jobs and settings are kept.
+
+- Publish a build with `./scripts/build_apk.sh`. It builds the release APK with the build number set to minutes since 1970, so every build is newer than the last. It writes `artifacts/fieldwork.apk` and `artifacts/fieldwork.json`. The running service picks both up without a restart.
+- The first time, Android asks you to allow Fieldwork to install apps. Fieldwork opens that setting; switch it on, come back and tap Install again.
+- Builds from before this feature (build 1) cannot update themselves. Install one updater build manually first.
+- `GET /app` reports the published build. `GET /app/fieldwork.apk` serves it. Both need the access token. The APK contains no credentials or tokens.
+- The installer's result goes to `InstallStatusReceiver`, which is not exported. Other apps cannot fake it. The receiver only acts on install sessions Fieldwork created. It only opens Android's own install confirmation (`CONFIRM_INSTALL`), with any file-access grants removed.
+
+## Claude ranking
+
+With **Let Claude rank the top roles** on (the default), the service sends the top 40 keyword matches to Claude Code on the Mac after fetching. Claude Code runs headless (`claude -p`) under your Claude login, so it uses your Claude subscription, not an API key. Claude returns a 0–100 fit, apply/maybe/skip, its own reading of Romania eligibility, and short reasons and concerns. Ranked roles come first, ordered by verdict and fit. The rest follow in keyword order.
+
+- Claude must be installed and signed in on the Mac (`claude` on the service's `PATH`). **Test connection** reports whether it was found.
+- Your profile is read from `backend/profile.md`, which git ignores. `JOBS_PROFILE_FILE` points elsewhere. Without a profile, Claude judges against the app's preferences only.
+- `JOBS_AI_MODEL` (default `opus`), `JOBS_AI_EFFORT` (default `medium`) and `JOBS_AI_LIMIT` (default `40`) tune the call. Descriptions are cut to 1,500 characters per listing.
+- The call has no tools, MCP servers, user settings, hooks or saved session. It runs in an empty temporary folder. It drops `ANTHROPIC_API_KEY` and Claude Code session variables from its environment, so a key exported in your shell cannot redirect it to API billing.
+- Verdicts are cached in service memory per listing, profile and preferences, so a repeated search only sends new listings. A live run of 40 listings with Opus took about 50 seconds.
+- If Claude fails (not installed, signed out, usage limit, timeout), the search still completes with keyword ranking, and the app says why.
+- Your profile and the listings are sent to Anthropic, as in any Claude conversation. Claude's eligibility reading comes from listing text, like the keyword labels; confirm with the employer.
 
 ## Options and behavior
 
@@ -50,17 +85,19 @@ Flutter and an Android SDK are required. This workspace was built using Flutter 
 flutter pub get
 flutter analyze
 flutter test
-python3 -m unittest discover -s backend/tests -v
-JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home flutter build apk --release --target-platform android-arm64
+python3 -m unittest discover -s backend/tests -v   # never calls Claude; the AI step uses a fake runner
+./scripts/build_apk.sh   # release APK + artifacts/fieldwork.json for in-app updates
 ```
 
 The backend tests include the original collector regression suite, preference/eligibility cases, caching, partial failures, and actual local HTTP authentication. HTTP tests need permission to open a localhost socket.
 
-The main implementation is in `lib/`, `backend/service.py`, and `scripts/serve.sh`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
+The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
 
 ## Verification (October 9, 2026)
 
-- 110 Python tests and ten Flutter tests passed; `flutter analyze` reported no issues.
+- 123 Python tests and 16 Flutter tests passed; `flutter analyze` reported no issues.
+- In-app update, emulator: build 29859242 reported "You have the latest build". After build 29859244 was published, the button offered it and opened the "Install unknown apps" setting once. It then downloaded and verified the build and showed Android's update dialog. After confirming, the device reported versionCode 29859244, and saved results and options were intact. After moving install results to the non-exported receiver, a second pass updated 29859248 → 29859249 the same way, with no logcat crashes or blocked activity launches.
+- Claude ranking, live: a default search through the Tailscale address fetched 1,794 listings from nine sources in about 100 seconds. Opus then ranked the top 40 in about 50 seconds on the subscription login, and 79 roles were returned. An emulator search with the same options reused the cached verdicts and finished in 15 seconds. It showed the Claude pills, the top reason on each card, Claude's take in the details sheet and the status line, with no logcat errors.
 - Live Adzuna verification fetched 50 listings. Remotive and Himalayas fetched 63 combined.
 - A search initiated in the Android emulator called all three selected sources and displayed 12 matching fully remote roles with Romania/Europe/worldwide eligibility. The other adapters have regression coverage but were not all live-tested in this run.
 - A second emulator pass covered connection testing, a live search, save/dismiss/restore, persistence across restart, the results filter, and an unreachable service. The rebuilt APK fixed four display issues found in that pass: raw network exceptions, singular counts ("1 opportunity"), the lowercase Adzuna source name, and the source count shown during a search.

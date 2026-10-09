@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'updater.dart';
 
 void main() => runApp(const JobsApp());
 const ink = Color(0xFF172C2A);
@@ -60,6 +63,7 @@ class _JobsHomeState extends State<JobsHome> {
   Map<String, dynamic> saved = {};
   Set<String> dismissed = {};
   List<dynamic> sources = [];
+  Map<String, dynamic>? aiStatus;
   String baseUrl = 'http://127.0.0.1:8765',
       token = '',
       status = '',
@@ -101,6 +105,8 @@ class _JobsHomeState extends State<JobsHome> {
           .map((j) => Job(Map<String, dynamic>.from(j)))
           .toList();
       sources = jsonDecode(p.getString('sources') ?? '[]') as List;
+      final ai = jsonDecode(p.getString('ai') ?? 'null');
+      aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
       cached = jobs.isNotEmpty;
     } catch (_) {
       error = 'Some saved data could not be loaded. Run a new search.';
@@ -129,6 +135,7 @@ class _JobsHomeState extends State<JobsHome> {
     await p.setStringList('dismissed', dismissed.toList());
     await p.setString('jobs', jsonEncode(jobs.map((j) => j.data).toList()));
     await p.setString('sources', jsonEncode(sources));
+    await p.setString('ai', jsonEncode(aiStatus));
     await p.setString('updated', updated);
     await p.setString('url', baseUrl);
     await p.setString('token', token);
@@ -182,6 +189,8 @@ class _JobsHomeState extends State<JobsHome> {
                 .map((j) => Job(Map<String, dynamic>.from(j)))
                 .toList();
             updated = result['updated_at'] as String;
+            final ai = result['ai'];
+            aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
             cached = false;
           });
           await persist();
@@ -294,6 +303,21 @@ class _JobsHomeState extends State<JobsHome> {
             const Text(
               'Location labels come from listing text. Confirm the employer can hire from Romania.',
             ),
+            if (j.ai != null) ...[
+              const SizedBox(height: 20),
+              Text(
+                "CLAUDE'S TAKE · ${j.ai!['fit']}/100 · ${verdictLabel(j.ai!['verdict'].toString())}",
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(romaniaLabel(j.ai!['romania'].toString())),
+              ...j.aiList('reasons').map((r) => Text('+ $r')),
+              ...j.aiList('concerns').map((c) => Text('− $c')),
+              const SizedBox(height: 8),
+              const Text(
+                'Claude compared the listing text with your profile. Check the original before applying.',
+              ),
+            ],
             const SizedBox(height: 20),
             Text(
               'WHY IT MATCHES · ${j.text('score')} points',
@@ -458,7 +482,7 @@ class _JobsHomeState extends State<JobsHome> {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            '${options['adzuna'] ? 'Adzuna + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}',
+                            '${options['adzuna'] ? 'Adzuna + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · Claude picks' : ''}',
                             style: const TextStyle(color: Color(0xFFCEDBD4)),
                           ),
                           const SizedBox(height: 20),
@@ -534,6 +558,29 @@ class _JobsHomeState extends State<JobsHome> {
                                 ),
                               )
                               .toList(),
+                        ),
+                      ),
+                    if (aiStatus != null && !busy)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.auto_awesome_outlined,
+                              size: 18,
+                              color: aiStatus!['status'] == 'error'
+                                  ? Colors.orange.shade800
+                                  : accent,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                aiSummary(aiStatus!),
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     const SizedBox(height: 20),
@@ -669,6 +716,11 @@ class _JobsHomeState extends State<JobsHome> {
                                   spacing: 6,
                                   runSpacing: 6,
                                   children: [
+                                    if (j.ai != null)
+                                      pill(
+                                        'Claude ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
+                                        j.ai!['verdict'] == 'apply',
+                                      ),
                                     pill(
                                       eligibilityLabel(j.text('eligibility')),
                                       j.eligible,
@@ -679,6 +731,17 @@ class _JobsHomeState extends State<JobsHome> {
                                         .map((m) => pill(m, false)),
                                   ],
                                 ),
+                                if (j.aiList('reasons').isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 10),
+                                    child: Text(
+                                      j.aiList('reasons').first,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: Color(0xFF3F4F4B),
+                                      ),
+                                    ),
+                                  ),
                                 if (j.text('salary').isNotEmpty)
                                   Padding(
                                     padding: const EdgeInsets.only(top: 12),
@@ -761,8 +824,10 @@ class OptionsPage extends StatefulWidget {
 class _OptionsPageState extends State<OptionsPage> {
   late Map<String, dynamic> o;
   late TextEditingController url, token, keywords;
-  String? connection;
-  bool checking = false;
+  String? connection, updateMessage;
+  Map<String, dynamic>? installed, release;
+  double? progress;
+  bool checking = false, updating = false;
   @override
   void initState() {
     super.initState();
@@ -770,10 +835,19 @@ class _OptionsPageState extends State<OptionsPage> {
     url = TextEditingController(text: widget.url);
     token = TextEditingController(text: widget.token);
     keywords = TextEditingController(text: o['keywords']);
+    AppUpdater.onInstallFailed((message) {
+      if (mounted) {
+        setState(() {
+          updateMessage = message;
+        });
+      }
+    });
+    unawaited(loadInstalled());
   }
 
   @override
   void dispose() {
+    AppUpdater.channel.setMethodCallHandler(null);
     url.dispose();
     token.dispose();
     keywords.dispose();
@@ -788,11 +862,17 @@ class _OptionsPageState extends State<OptionsPage> {
     final api = JobsApi(url.text.trim(), token.text.trim());
     try {
       final health = await api.request('/health');
+      final adzuna = health['adzuna_configured'] == true
+          ? 'Connected. Adzuna credentials are ready.'
+          : 'Connected. Remote boards ready; Adzuna needs credentials on the service.';
+      final claude = switch (health['claude_available']) {
+        true => ' Claude ranking is ready.',
+        false => ' Claude Code was not found on the service.',
+        _ => '',
+      };
       if (mounted) {
         setState(() {
-          connection = health['adzuna_configured'] == true
-              ? 'Connected. Adzuna credentials are ready.'
-              : 'Connected. Remote boards ready; Adzuna needs credentials on the service.';
+          connection = '$adzuna$claude';
         });
       }
     } catch (_) {
@@ -806,6 +886,131 @@ class _OptionsPageState extends State<OptionsPage> {
       if (mounted) {
         setState(() {
           checking = false;
+        });
+      }
+    }
+  }
+
+  Future<void> loadInstalled() async {
+    try {
+      final info = await AppUpdater.info();
+      if (mounted) {
+        setState(() {
+          installed = info;
+        });
+      }
+    } on MissingPluginException {
+      // Only the Android app has the installer channel.
+    }
+  }
+
+  Future<void> checkUpdate() async {
+    final local = installed;
+    if (local == null) {
+      setState(() {
+        updateMessage = 'App updates work in the Android app only.';
+      });
+      return;
+    }
+    setState(() {
+      updating = true;
+      updateMessage = null;
+    });
+    final api = JobsApi(url.text.trim(), token.text.trim());
+    try {
+      final latest = await api.request('/app');
+      if (mounted) {
+        setState(() {
+          if (latest['available'] != true) {
+            updateMessage = 'Your service has no app build yet. Run scripts/build_apk.sh on your computer.';
+          } else if (isNewer(local, latest)) {
+            release = latest;
+            updateMessage = 'Build ${latest['version_code']} is ready.';
+          } else {
+            updateMessage = 'You have the latest build.';
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          updateMessage = e.toString().replaceFirst('Exception: ', '');
+        });
+      }
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          updating = false;
+        });
+      }
+    }
+  }
+
+  Future<void> installUpdate() async {
+    final latest = release!;
+    setState(() {
+      updating = true;
+      updateMessage = null;
+    });
+    final api = JobsApi(url.text.trim(), token.text.trim());
+    try {
+      final local = await AppUpdater.info();
+      if (local['canInstall'] != true) {
+        setState(() {
+          updateMessage = 'Allow Fieldwork to install apps, then come back and tap Install again.';
+        });
+        await AppUpdater.openInstallSettings();
+        return;
+      }
+      setState(() {
+        progress = 0;
+      });
+      final file = File('${local['cacheDir']}/fieldwork-update.apk');
+      await api.download(
+        '/app/fieldwork.apk',
+        file,
+        onProgress: (received, total) {
+          if (mounted && total > 0) {
+            setState(() {
+              progress = received / total;
+            });
+          }
+        },
+      );
+      if (await file.length() != latest['size']) {
+        throw Exception('The download was incomplete. Try again.');
+      }
+      if (mounted) {
+        setState(() {
+          progress = null;
+          updateMessage = 'Checking the download…';
+        });
+      }
+      await AppUpdater.install(file.path, latest['sha256'] as String);
+      if (mounted) {
+        setState(() {
+          updateMessage = 'Confirm the update in the Android dialog, then open Fieldwork again.';
+        });
+      }
+    } on PlatformException catch (e) {
+      if (mounted) {
+        setState(() {
+          updateMessage = e.message ?? 'The update could not be installed.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          updateMessage = e.toString().replaceFirst('Exception: ', '');
+        });
+      }
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          updating = false;
+          progress = null;
         });
       }
     }
@@ -949,6 +1154,12 @@ class _OptionsPageState extends State<OptionsPage> {
           'Studio boards list open roles and are not filtered by posting age.',
           style: TextStyle(fontSize: 12, color: Colors.black54),
         ),
+        heading('Ranking'),
+        toggle(
+          'ai_pick',
+          'Let Claude rank the top roles',
+          'Claude Code on your computer scores up to 40 roles against your profile, using your Claude subscription.',
+        ),
         heading('Job sources'),
         toggle(
           'adzuna',
@@ -1039,6 +1250,44 @@ class _OptionsPageState extends State<OptionsPage> {
           Padding(
             padding: const EdgeInsets.only(top: 10),
             child: Text(connection!),
+          ),
+        heading('App updates'),
+        Text(
+          installed == null
+              ? 'Installs builds that your computer publishes with scripts/build_apk.sh.'
+              : '${buildLabel(installed!)}. Updates come from the service above.',
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: updating
+              ? null
+              : release == null
+              ? checkUpdate
+              : installUpdate,
+          icon: Icon(
+            release == null
+                ? Icons.system_update_outlined
+                : Icons.download_rounded,
+          ),
+          label: Text(
+            updating
+                ? progress != null
+                      ? 'Downloading…'
+                      : 'Working…'
+                : release == null
+                ? 'Check for app update'
+                : 'Install build ${release!['version_code']}',
+          ),
+        ),
+        if (progress != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: LinearProgressIndicator(value: progress),
+          ),
+        if (updateMessage != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text(updateMessage!),
           ),
         const SizedBox(height: 12),
         const Text(

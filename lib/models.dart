@@ -38,6 +38,7 @@ Map<String, dynamic> defaultOptions() => {
   'contract_only': false,
   'prefer_contract': true,
   'max_age_days': 30,
+  'ai_pick': true,
 };
 
 String eligibilityLabel(String value) => switch (value) {
@@ -48,6 +49,32 @@ String eligibilityLabel(String value) => switch (value) {
   _ => 'Eligibility unclear',
 };
 
+String verdictLabel(String value) => switch (value) {
+  'apply' => 'Apply',
+  'skip' => 'Skip',
+  _ => 'Maybe',
+};
+
+String romaniaLabel(String value) => switch (value) {
+  'yes' => 'Claude: open to Romania',
+  'no' => 'Claude: not open to Romania',
+  _ => 'Claude: Romania eligibility unclear',
+};
+
+// One line for the result of the Claude ranking step of a search.
+String aiSummary(Map<String, dynamic> status) {
+  final ranked = (status['ranked'] as num?)?.toInt() ?? 0;
+  final shortlist = (status['shortlist'] as num?)?.toInt() ?? ranked;
+  final note = (status['message'] ?? '').toString();
+  final line = switch (status['status']) {
+    'ok' => 'Claude ranked the top ${plural(ranked, 'role')}.',
+    'partial' =>
+      'Claude ranked $ranked of the top ${plural(shortlist, 'role')}.',
+    _ => 'Claude ranking unavailable, showing keyword ranking.',
+  };
+  return note.isEmpty ? line : '$line $note';
+}
+
 class Job {
   final Map<String, dynamic> data;
   Job(this.data);
@@ -57,4 +84,7 @@ class Job {
       List<String>.from(data['sources'] ?? [data['source']]);
   List<String> get matches => List<String>.from(data['matched']?['core'] ?? []);
   bool get eligible => ['worldwide', 'europe'].contains(text('eligibility'));
+  Map<String, dynamic>? get ai =>
+      data['ai'] is Map ? Map<String, dynamic>.from(data['ai'] as Map) : null;
+  List<String> aiList(String key) => List<String>.from(ai?[key] ?? []);
 }

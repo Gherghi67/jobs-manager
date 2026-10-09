@@ -3,6 +3,7 @@ import datetime
 import json
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -63,7 +64,7 @@ class RankingTests(unittest.TestCase):
 class EngineTests(unittest.TestCase):
     def test_partial_failure_keeps_working_source(self):
         engine = s.Engine()
-        o = s.validate_options({'adzuna': False, 'boards': ['remotive', 'remoteok']})
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive', 'remoteok'], 'ai_pick': False})
         engine.runs['x'] = {}
         with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job()], 'remoteok': lambda *a: (_ for _ in ()).throw(ValueError('secret-url'))}):
             engine.run('x', o)
@@ -111,6 +112,29 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as e:
             urlopen(Request(self.url + '/search', data=b'{"max_age_days":999}', headers=headers))
         self.assertEqual(e.exception.code, 400)
+    def test_app_release_and_download(self):
+        headers = {'Authorization': 'Bearer ' + self.token}
+        with tempfile.TemporaryDirectory() as folder, patch.object(s, 'APP_DIR', Path(folder)):
+            with urlopen(Request(self.url + '/app', headers=headers)) as r:
+                self.assertEqual(json.load(r), {'available': False})
+            with self.assertRaises(HTTPError) as e:
+                urlopen(Request(self.url + '/app/fieldwork.apk', headers=headers))
+            self.assertEqual(e.exception.code, 404)
+            apk = b'PK' + bytes(range(256)) * 5000
+            (Path(folder) / 'fieldwork.apk').write_bytes(apk)
+            (Path(folder) / 'fieldwork.json').write_text('{"version_code": 29700000, "version_name": "1.0.0"}')
+            with urlopen(Request(self.url + '/app', headers=headers)) as r:
+                self.assertEqual(json.load(r), {'available': True, 'version_code': 29700000, 'version_name': '1.0.0',
+                                                'size': len(apk), 'sha256': s.hashlib.sha256(apk).hexdigest()})
+            with urlopen(Request(self.url + '/app/fieldwork.apk', headers=headers)) as r:
+                self.assertEqual(r.headers['Content-Type'], 'application/vnd.android.package-archive')
+                self.assertEqual(r.read(), apk)
+            with self.assertRaises(HTTPError) as e:
+                urlopen(self.url + '/app/fieldwork.apk')
+            self.assertEqual(e.exception.code, 401)
+            (Path(folder) / 'fieldwork.json').write_text('{"version_code": "soon"}')
+            with urlopen(Request(self.url + '/app', headers=headers)) as r:
+                self.assertEqual(json.load(r), {'available': False})
 
 if __name__ == '__main__':
     unittest.main()
