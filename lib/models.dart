@@ -39,6 +39,8 @@ Map<String, dynamic> defaultOptions() => {
   'prefer_contract': true,
   'max_age_days': 30,
   'ai_pick': true,
+  'ai_engine': 'claude',
+  'ai_subscription': 'personal',
 };
 
 String eligibilityLabel(String value) => switch (value) {
@@ -55,22 +57,30 @@ String verdictLabel(String value) => switch (value) {
   _ => 'Maybe',
 };
 
-String romaniaLabel(String value) => switch (value) {
-  'yes' => 'Claude: open to Romania',
-  'no' => 'Claude: not open to Romania',
-  _ => 'Claude: Romania eligibility unclear',
-};
+String engineLabel(dynamic engine) => engine == 'codex' ? 'Codex' : 'Claude';
+
+String romaniaLabel(String value, [String engine = 'Claude']) =>
+    switch (value) {
+      'yes' => '$engine: open to Romania',
+      'no' => '$engine: not open to Romania',
+      _ => '$engine: Romania eligibility unclear',
+    };
 
 // One line for the result of the Claude ranking step of a search.
 String aiSummary(Map<String, dynamic> status) {
+  final engine = engineLabel(status['engine']);
+  final subscription = status['subscription'];
+  final label = subscription == null
+      ? engine
+      : '$engine · ${subscription == 'work' ? 'Work' : 'Personal'}';
   final ranked = (status['ranked'] as num?)?.toInt() ?? 0;
   final shortlist = (status['shortlist'] as num?)?.toInt() ?? ranked;
   final note = (status['message'] ?? '').toString();
   final line = switch (status['status']) {
-    'ok' => 'Claude ranked the top ${plural(ranked, 'role')}.',
+    'ok' => '$label ranked the top ${plural(ranked, 'role')}.',
     'partial' =>
-      'Claude ranked $ranked of the top ${plural(shortlist, 'role')}.',
-    _ => 'Claude ranking unavailable, showing keyword ranking.',
+      '$label ranked $ranked of the top ${plural(shortlist, 'role')}.',
+    _ => '$label ranking unavailable, showing keyword ranking.',
   };
   return note.isEmpty ? line : '$line $note';
 }

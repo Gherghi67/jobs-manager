@@ -27,11 +27,12 @@ import adzuna_search as az
 import remote_search as remote
 import ai_pick as ai
 import claude_chat
+import gmail_sync
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
 DEFAULTS = dict(preset='broad', adzuna=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
                 keywords='', remote_only=True, eligibility='romania', contract_only=False,
-                prefer_contract=True, max_age_days=30, ai_pick=True)
+                prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal')
 
 
 def config(name):
@@ -45,6 +46,7 @@ def validate_options(value):
         raise ValueError('Unknown search option.')
     o = copy.deepcopy(DEFAULTS)
     o.update(value)
+    ai.accounts.validate(o['ai_engine'], o['ai_subscription'])
     if o['preset'] not in ('backend', 'broad', 'gaming'):
         raise ValueError('Unknown preset.')
     for key in ('adzuna', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
@@ -380,11 +382,20 @@ class AppliedStore:
                 raise ValueError('Invalid email.')
             row = {'date': utc_iso(e.get('date')), 'kind': e['kind'], 'from': str(e.get('from') or '')[:200],
                    'subject': e['subject'][:200]}
-            same = next((x for x in entry['emails'] if x['date'] == row['date'] and x['subject'] == row['subject']), None)
+            for key in ('message_id', 'thread_id'):
+                if e.get(key):
+                    if not isinstance(e[key], str) or len(e[key]) > 200:
+                        raise ValueError('Invalid email identifier.')
+                    row[key] = e[key]
+            same = next((x for x in entry['emails'] if
+                         (row.get('message_id') and x.get('message_id') == row['message_id']) or
+                         (x['date'] == row['date'] and x['subject'] == row['subject'])), None)
             if same is None:
                 entry['emails'].append(row)
-            elif not same.get('from'):
-                same['from'] = row['from']
+            else:
+                for key in ('from', 'message_id', 'thread_id'):
+                    if not same.get(key) and row.get(key):
+                        same[key] = row[key]
         # Oldest first; the newest 100 are kept.
         entry['emails'] = sorted(entry['emails'], key=lambda x: x['date'])[-100:]
 
@@ -526,16 +537,18 @@ class Engine:
                 self.update(key, jobs=jobs, sources=copy.deepcopy(statuses), fetched=len(raw), applied_hidden=hidden)
             if o['ai_pick'] and jobs:
                 count = min(len(jobs), ai.LIMIT)
-                self.update(key, current=f'Claude is ranking {count} role{"" if count == 1 else "s"}', source=None)
+                label = f'{o["ai_engine"].title()} · {o["ai_subscription"].title()}'
+                self.update(key, current=f'{label} is ranking {count} role{"" if count == 1 else "s"}', source=None)
                 try:
                     # Work on a copy: polling threads deep-copy the published run state.
                     jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache)
                     # Roles at companies already applied to stay below the rest, even when Claude ranked them.
                     jobs.sort(key=lambda j: 'applied_badge' in j)
                 except ai.AIError as exc:
-                    status = dict(status='error', message=str(exc))
+                    status = dict(status='error', engine=o['ai_engine'], subscription=o['ai_subscription'], message=str(exc))
                 except Exception as exc:
-                    status = dict(status='error', message=f'{type(exc).__name__}: Claude ranking failed; keyword ranking shown.')
+                    status = dict(status='error', engine=o['ai_engine'], subscription=o['ai_subscription'],
+                                  message=f'{type(exc).__name__}: {label} ranking failed; keyword ranking shown.')
                 self.update(key, jobs=jobs, ai=status)
             self.update(key, status='complete', current='Search complete', updated_at=dt.datetime.now(dt.timezone.utc).isoformat())
         except Exception:
@@ -583,6 +596,7 @@ def download_name(path):
 class Handler(BaseHTTPRequestHandler):
     engine = Engine()
     chats = claude_chat.ChatStore()
+    gmail = None
     token = ''
     def log_message(self, *args):
         pass
@@ -611,11 +625,16 @@ class Handler(BaseHTTPRequestHandler):
                                'claude_available': ai.available(), 'claude_chat': claude_chat.enabled()})
         elif path == '/app':
             self.respond(200, app_release())
+        elif path == '/ranking/accounts':
+            self.respond(200, {'accounts': ai.accounts.catalog()})
         elif path == '/applied':
             try:
-                self.respond(200, {'jobs': self.engine.applied.list()})
+                self.respond(200, {'jobs': self.engine.applied.list(),
+                                   'gmail_sync': self.gmail.status() if self.gmail else {'enabled': False}})
             except StoreError as exc:
                 self.respond(500, {'error': str(exc)})
+        elif path == '/gmail-sync':
+            self.respond(200, self.gmail.status() if self.gmail else {'enabled': False})
         elif path == '/app/fieldwork.apk':
             self.send_file(APP_DIR / 'fieldwork.apk', 'application/vnd.android.package-archive',
                            'No app build is published on the service.')
@@ -652,6 +671,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         path = urlparse(self.path).path
+        if path == '/gmail-sync':
+            if not self.gmail:
+                return self.respond(503, {'error': 'Gmail sync is not configured.'})
+            threading.Thread(target=self.gmail.run_due, daemon=True).start()
+            return self.respond(202, self.gmail.status())
         if path.startswith('/claude/'):
             return self.claude('POST', path)
         if path not in ('/search', '/applied'):
@@ -774,7 +798,10 @@ def main():
     Handler.token = token
     print(f'Jobs service: http://{args.host}:{args.port}', flush=True)
     print('Use the token from backend/.access-token (or JOBS_ACCESS_TOKEN) in the app.', flush=True)
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    Handler.gmail = gmail_sync.GmailSync(Handler.engine.applied)
+    Handler.gmail.start()
+    server.serve_forever()
 
 if __name__ == '__main__':
     main()

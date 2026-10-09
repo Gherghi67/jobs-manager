@@ -64,7 +64,7 @@ class JobsHome extends StatefulWidget {
   State<JobsHome> createState() => _JobsHomeState();
 }
 
-class _JobsHomeState extends State<JobsHome> {
+class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   SharedPreferences? prefs;
   Map<String, dynamic> options = defaultOptions();
   List<Job> jobs = [];
@@ -84,18 +84,45 @@ class _JobsHomeState extends State<JobsHome> {
   int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
   int appliedVersion = 0;
   JobsApi? activeApi;
+  Timer? appliedTimer;
+  DateTime? appliedFetchedAt, appliedAttemptAt;
+  bool appliedFetching = false;
+  Map<String, dynamic> gmailSync = {};
   // One list serves every tab; a new tab starts at its top.
   final listScroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    appliedTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        unawaited(refreshAppliedIfDue());
+      }
+    });
     load();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && !loading) {
+      unawaited(refreshAppliedIfDue());
+    }
+  }
+
+  Future<void> refreshAppliedIfDue() async {
+    final now = DateTime.now();
+    if (loading || !dailyRefreshDue(appliedFetchedAt, appliedAttemptAt, now)) {
+      return;
+    }
+    await syncApplied();
   }
 
   @override
   void dispose() {
     generation++;
+    WidgetsBinding.instance.removeObserver(this);
+    appliedTimer?.cancel();
     activeApi?.close();
     listScroll.dispose();
     super.dispose();
@@ -119,6 +146,12 @@ class _JobsHomeState extends State<JobsHome> {
         jsonDecode(p.getString('applied') ?? '{}'),
       );
       appliedHidden = p.getInt('applied_hidden') ?? 0;
+      appliedFetchedAt = DateTime.tryParse(
+        p.getString('applied_fetched_at') ?? '',
+      );
+      gmailSync = Map<String, dynamic>.from(
+        jsonDecode(p.getString('gmail_sync') ?? '{}'),
+      );
       jobs = (jsonDecode(p.getString('jobs') ?? '[]') as List)
           .map((j) => Job(Map<String, dynamic>.from(j)))
           .toList();
@@ -136,7 +169,7 @@ class _JobsHomeState extends State<JobsHome> {
       token = p.getString('token') ?? '';
       updated = p.getString('updated') ?? '';
     });
-    unawaited(syncApplied());
+    unawaited(refreshAppliedIfDue());
   }
 
   JobsApi api() => JobsApi(baseUrl, token, client: widget.httpClient?.call());
@@ -155,6 +188,11 @@ class _JobsHomeState extends State<JobsHome> {
     await p.setString('saved', jsonEncode(saved));
     await p.setStringList('dismissed', dismissed.toList());
     await p.setString('applied', jsonEncode(applied));
+    await p.setString(
+      'applied_fetched_at',
+      appliedFetchedAt?.toIso8601String() ?? '',
+    );
+    await p.setString('gmail_sync', jsonEncode(gmailSync));
     await p.setInt('applied_hidden', appliedHidden);
     await p.setString('jobs', jsonEncode(jobs.map((j) => j.data).toList()));
     await p.setString('sources', jsonEncode(sources));
@@ -250,12 +288,20 @@ class _JobsHomeState extends State<JobsHome> {
     }
     final result = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(
-        builder: (_) =>
-            OptionsPage(options: options, url: baseUrl, token: token),
+        builder: (_) => OptionsPage(
+          options: options,
+          url: baseUrl,
+          token: token,
+          httpClient: widget.httpClient,
+        ),
       ),
     );
     if (result != null && mounted) {
       setState(() {
+        appliedVersion++;
+        appliedFetchedAt = null;
+        appliedAttemptAt = null;
+        gmailSync = {};
         options = result['options'];
         baseUrl = result['url'];
         token = result['token'];
@@ -289,15 +335,21 @@ class _JobsHomeState extends State<JobsHome> {
   // The applied list lives on the service, which leaves those roles out of
   // every search before Claude ranks them.
   Future<void> syncApplied() async {
-    if (token.isEmpty) {
+    if (token.isEmpty || appliedFetching) {
       return;
     }
+    appliedFetching = true;
+    appliedAttemptAt = DateTime.now();
     final version = appliedVersion;
+    final requestedUrl = baseUrl, requestedToken = token;
     final api = this.api();
     try {
       final result = await api.request('/applied');
       // A change made while this request was in flight is newer.
-      if (!mounted || version != appliedVersion) {
+      if (!mounted ||
+          version != appliedVersion ||
+          requestedUrl != baseUrl ||
+          requestedToken != token) {
         return;
       }
       setState(() {
@@ -306,10 +358,14 @@ class _JobsHomeState extends State<JobsHome> {
             (j as Map)['id'] as String: Map<String, dynamic>.from(j),
         };
         appliedNote = null;
+        gmailSync = Map<String, dynamic>.from(
+          result['gmail_sync'] as Map? ?? {},
+        );
+        appliedFetchedAt = DateTime.now();
       });
       await persist();
     } catch (e) {
-      if (mounted) {
+      if (mounted && requestedUrl == baseUrl && requestedToken == token) {
         setState(() {
           appliedNote =
               'Showing the copy on this phone. ${e.toString().replaceFirst('Exception: ', '')}';
@@ -317,6 +373,7 @@ class _JobsHomeState extends State<JobsHome> {
       }
     } finally {
       api.close();
+      appliedFetching = false;
     }
   }
 
@@ -585,16 +642,21 @@ class _JobsHomeState extends State<JobsHome> {
             if (j.ai != null) ...[
               const SizedBox(height: 20),
               Text(
-                "CLAUDE'S TAKE · ${j.ai!['fit']}/100 · ${verdictLabel(j.ai!['verdict'].toString())}",
+                "${engineLabel(j.ai!['engine']).toUpperCase()}'S TAKE · ${j.ai!['fit']}/100 · ${verdictLabel(j.ai!['verdict'].toString())}",
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
-              Text(romaniaLabel(j.ai!['romania'].toString())),
+              Text(
+                romaniaLabel(
+                  j.ai!['romania'].toString(),
+                  engineLabel(j.ai!['engine']),
+                ),
+              ),
               ...j.aiList('reasons').map((r) => Text('+ $r')),
               ...j.aiList('concerns').map((c) => Text('− $c')),
               const SizedBox(height: 8),
-              const Text(
-                'Claude compared the listing text with your profile. Check the original before applying.',
+              Text(
+                '${engineLabel(j.ai!['engine'])} compared the listing text with your profile. Check the original before applying.',
               ),
             ],
             const SizedBox(height: 20),
@@ -747,7 +809,7 @@ class _JobsHomeState extends State<JobsHome> {
             listScroll.jumpTo(0);
           }
           if (v == 2) {
-            unawaited(syncApplied());
+            unawaited(refreshAppliedIfDue());
           }
         },
         destinations: const [
@@ -850,7 +912,7 @@ class _JobsHomeState extends State<JobsHome> {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            '${options['adzuna'] ? 'Adzuna + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · Claude picks' : ''}',
+                            '${options['adzuna'] ? 'Adzuna + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · ${engineLabel(options['ai_engine'])} picks' : ''}',
                             style: const TextStyle(color: Color(0xFFCEDBD4)),
                           ),
                           const SizedBox(height: 20),
@@ -960,6 +1022,11 @@ class _JobsHomeState extends State<JobsHome> {
                         appliedNote!,
                         style: TextStyle(color: Colors.orange.shade900),
                       ),
+                    ),
+                  if (tab == 2)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Text(gmailSyncLabel(gmailSync, appliedFetchedAt)),
                     ),
                   if (tab == 2 && applied.isNotEmpty) ...[
                     StatsPanel(
@@ -1186,7 +1253,7 @@ class _JobsHomeState extends State<JobsHome> {
                                         ),
                                       if (j.ai != null)
                                         pill(
-                                          'Claude ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
+                                          '${engineLabel(j.ai!['engine'])} ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
                                           j.ai!['verdict'] == 'apply',
                                         ),
                                       pill(
@@ -1307,11 +1374,13 @@ class _JobsHomeState extends State<JobsHome> {
 class OptionsPage extends StatefulWidget {
   final Map<String, dynamic> options;
   final String url, token;
+  final http.Client Function()? httpClient;
   const OptionsPage({
     super.key,
     required this.options,
     required this.url,
     required this.token,
+    this.httpClient,
   });
   @override
   State<OptionsPage> createState() => _OptionsPageState();
@@ -1320,14 +1389,19 @@ class OptionsPage extends StatefulWidget {
 class _OptionsPageState extends State<OptionsPage> {
   late Map<String, dynamic> o;
   late TextEditingController url, token, keywords;
-  String? connection, updateMessage;
+  String? connection, updateMessage, rankingMessage;
+  List<Map<String, dynamic>> rankingAccounts = [];
+  bool checkingRanking = false;
   Map<String, dynamic>? installed, release;
   double? progress;
   bool checking = false, updating = false;
   @override
   void initState() {
     super.initState();
-    o = jsonDecode(jsonEncode(widget.options));
+    o = {
+      ...defaultOptions(),
+      ...jsonDecode(jsonEncode(widget.options)) as Map<String, dynamic>,
+    };
     url = TextEditingController(text: widget.url);
     token = TextEditingController(text: widget.token);
     keywords = TextEditingController(text: o['keywords']);
@@ -1350,6 +1424,53 @@ class _OptionsPageState extends State<OptionsPage> {
     super.dispose();
   }
 
+  Future<void> checkRanking() async {
+    setState(() {
+      checkingRanking = true;
+      rankingMessage = null;
+      rankingAccounts = [];
+    });
+    final api = JobsApi(
+      url.text.trim(),
+      token.text.trim(),
+      client: widget.httpClient?.call(),
+    );
+    try {
+      final data = await api.request('/ranking/accounts');
+      if (mounted) {
+        setState(() {
+          rankingAccounts = (data['accounts'] as List)
+              .map((r) => Map<String, dynamic>.from(r as Map))
+              .toList();
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          rankingMessage = 'Could not check ranking accounts. Check the connection and update the service if needed.';
+        });
+      }
+    } finally {
+      api.close();
+      if (mounted) {
+        setState(() {
+          checkingRanking = false;
+        });
+      }
+    }
+  }
+
+  String get rankingStatus {
+    if (rankingMessage != null) return rankingMessage!;
+    for (final row in rankingAccounts) {
+      if (row['engine'] == o['ai_engine'] &&
+          row['subscription'] == o['ai_subscription']) {
+        return '${engineLabel(row['engine'])} · ${row['subscription'] == 'work' ? 'Work' : 'Personal'}: ${row['message']}';
+      }
+    }
+    return 'Uses the selected login on your computer for the next search. If unavailable, results keep keyword ranking.';
+  }
+
   Future<void> check() async {
     setState(() {
       checking = true;
@@ -1361,14 +1482,9 @@ class _OptionsPageState extends State<OptionsPage> {
       final adzuna = health['adzuna_configured'] == true
           ? 'Connected. Adzuna credentials are ready.'
           : 'Connected. Remote boards ready; Adzuna needs credentials on the service.';
-      final claude = switch (health['claude_available']) {
-        true => ' Claude ranking is ready.',
-        false => ' Claude Code was not found on the service.',
-        _ => '',
-      };
       if (mounted) {
         setState(() {
-          connection = '$adzuna$claude';
+          connection = adzuna;
         });
       }
     } catch (_) {
@@ -1653,9 +1769,44 @@ class _OptionsPageState extends State<OptionsPage> {
         heading('Ranking'),
         toggle(
           'ai_pick',
-          'Let Claude rank the top roles',
-          'Claude Code on your computer scores up to 40 roles against your profile, using your Claude subscription.',
+          'Let AI rank the top roles',
+          'Scores up to 40 roles against your profile using the selected subscription.',
         ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          key: const ValueKey('ranking-engine'),
+          initialValue: o['ai_engine'],
+          decoration: const InputDecoration(labelText: 'Ranking engine'),
+          items: const [
+            DropdownMenuItem(value: 'claude', child: Text('Claude Code')),
+            DropdownMenuItem(value: 'codex', child: Text('Codex')),
+          ],
+          onChanged: (v) => setState(() {
+            o['ai_engine'] = v!;
+          }),
+        ),
+        const SizedBox(height: 16),
+        DropdownButtonFormField<String>(
+          key: const ValueKey('ranking-subscription'),
+          initialValue: o['ai_subscription'],
+          decoration: const InputDecoration(labelText: 'Ranking subscription'),
+          items: const [
+            DropdownMenuItem(value: 'personal', child: Text('Personal')),
+            DropdownMenuItem(value: 'work', child: Text('Work')),
+          ],
+          onChanged: (v) => setState(() {
+            o['ai_subscription'] = v!;
+          }),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: checkingRanking ? null : checkRanking,
+          icon: const Icon(Icons.account_circle_outlined),
+          label: Text(
+            checkingRanking ? 'Checking accounts…' : 'Check ranking accounts',
+          ),
+        ),
+        Text(rankingStatus),
         heading('Job sources'),
         toggle(
           'adzuna',

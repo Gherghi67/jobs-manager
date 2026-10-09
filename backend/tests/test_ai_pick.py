@@ -47,6 +47,9 @@ class PickTests(unittest.TestCase):
     def setUp(self):
         self.options = s.validate_options({})
         self.profile = patch.object(ai, 'profile_text', return_value='Senior Node.js engineer in Romania.')
+        self.account = patch.object(ai.accounts, 'resolve', return_value=({}, 'account-1'))
+        self.account.start()
+        self.addCleanup(self.account.stop)
         self.profile.start()
         self.addCleanup(self.profile.stop)
 
@@ -55,7 +58,7 @@ class PickTests(unittest.TestCase):
         with patch.object(ai, 'LIMIT', 3):
             jobs, status = ai.pick([job(1), job(2), job(3), job(4)], self.options, {}, fake)
         self.assertEqual([j['id'] for j in jobs], ['id2', 'id3', 'id1', 'id4'])
-        self.assertEqual(jobs[0]['ai'], dict(fit=90, verdict='apply', romania='yes', reasons=['Stack match'], concerns=[]))
+        self.assertEqual(jobs[0]['ai'], dict(fit=90, verdict='apply', romania='yes', reasons=['Stack match'], concerns=[], engine='claude', subscription='personal'))
         self.assertNotIn('ai', jobs[3])
         self.assertEqual((status['status'], status['ranked'], status['shortlist'], status['fresh']), ('ok', 3, 3, 3))
 
@@ -76,6 +79,53 @@ class PickTests(unittest.TestCase):
         ai.pick([job(1)], self.options, cache, fake)
         self.assertEqual(len(fake.calls), 2)
 
+    def test_switching_subscription_or_identity_does_not_reuse_rankings(self):
+        cache, fake = {}, FakeClaude()
+        ai.pick([job(1)], self.options, cache, fake)
+        self.options['ai_subscription'] = 'work'
+        ai.pick([job(1)], self.options, cache, fake)
+        with patch.object(ai.accounts, 'resolve', return_value=({}, 'different-account')):
+            ai.pick([job(1)], self.options, cache, fake)
+        self.assertEqual(len(fake.calls), 3)
+
+    def test_codex_ranking_routes_to_selected_login_and_schema(self):
+        calls = []
+        def runner(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            self.assertEqual(cmd[:2], ['codex', 'exec'])
+            self.assertIn('--ignore-user-config', cmd)
+            self.assertIn('forced_login_method="chatgpt"', cmd)
+            self.assertEqual(kwargs['env']['CODEX_HOME'], '/accounts/work')
+            self.assertNotIn('OPENAI_API_KEY', kwargs['env'])
+            schema = json.loads(Path(cmd[cmd.index('--output-schema') + 1]).read_text())
+            self.assertEqual(schema, ai.SCHEMA)
+            Path(cmd[cmd.index('--output-last-message') + 1]).write_text(json.dumps({'jobs': [
+                dict(id='j1', fit=80, verdict='apply', romania='yes', reasons=[], concerns=[])]}))
+            return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+        self.options.update(ai_engine='codex', ai_subscription='work')
+        with patch.object(ai.accounts, 'resolve', return_value=({'CODEX_HOME': '/accounts/work'}, 'work-id')), \
+                patch.dict(os.environ, {'OPENAI_API_KEY': 'do-not-use', 'CODEX_API_KEY': 'do-not-use'}):
+            jobs, status = ai.pick([job(1)], self.options, {}, runner)
+        self.assertEqual(jobs[0]['ai']['engine'], 'codex')
+        self.assertEqual(status['subscription'], 'work')
+        self.assertEqual(len(calls), 1)
+
+    def test_codex_failures_are_readable_and_do_not_leak_output(self):
+        for output, rc in [('not json', 0), ('[]', 0), ('secret-token', 1)]:
+            def runner(cmd, **kwargs):
+                Path(cmd[cmd.index('--output-last-message') + 1]).write_text(output)
+                return subprocess.CompletedProcess(cmd, rc, stdout=output, stderr=output)
+            with self.subTest(output=output), self.assertRaises(ai.AIError) as caught:
+                ai.run_codex('prompt', {}, runner)
+            self.assertNotIn('secret-token', str(caught.exception))
+
+    def test_missing_account_never_falls_back_to_another_login(self):
+        fake = FakeClaude()
+        with patch.object(ai.accounts, 'resolve', side_effect=ai.accounts.AccountError('Work needs login')):
+            with self.assertRaisesRegex(ai.AIError, 'Work needs login'):
+                ai.pick([job(1)], self.options, {}, fake)
+        self.assertEqual(fake.calls, [])
+
     def test_invalid_rows_are_ignored_or_clamped(self):
         def runner(cmd, **kwargs):
             rows = [dict(id='j1', fit=250, verdict='hire', romania='maybe', reasons=['a', 'b', 'c', 'd'], concerns=[]),
@@ -83,7 +133,7 @@ class PickTests(unittest.TestCase):
             out = dict(is_error=False, structured_output=dict(jobs=rows))
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(out), stderr='')
         jobs, status = ai.pick([job(1), job(2)], self.options, {}, runner)
-        self.assertEqual(jobs[0]['ai'], dict(fit=100, verdict='maybe', romania='unclear', reasons=['a', 'b', 'c'], concerns=[]))
+        self.assertEqual(jobs[0]['ai'], dict(fit=100, verdict='maybe', romania='unclear', reasons=['a', 'b', 'c'], concerns=[], engine='claude', subscription='personal'))
         self.assertNotIn('ai', jobs[1])
         self.assertEqual(status['status'], 'partial')
 
@@ -155,7 +205,7 @@ class EngineAiTests(unittest.TestCase):
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(len(result['jobs']), 1)
         self.assertNotIn('ai', result['jobs'][0])
-        self.assertEqual(result['ai'], dict(status='error', message='Claude Code: usage limit reached'))
+        self.assertEqual(result['ai'], dict(status='error', engine='claude', subscription='personal', message='Claude Code: usage limit reached'))
 
     def test_unexpected_failure_is_not_leaked(self):
         def pick(jobs, o, cache):

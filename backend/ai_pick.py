@@ -1,4 +1,4 @@
-"""Ranks the keyword shortlist with Claude Code in headless mode, on the computer's Claude login."""
+"""Rank the keyword shortlist using a selected Claude or Codex subscription."""
 from __future__ import annotations
 import hashlib
 import json
@@ -7,10 +7,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import ranking_accounts as accounts
 
 ROOT = Path(__file__).resolve().parent
 MODEL = os.environ.get('JOBS_AI_MODEL', 'opus')
 EFFORT = os.environ.get('JOBS_AI_EFFORT', 'medium')
+CODEX_MODEL = os.environ.get('JOBS_CODEX_MODEL', '')
 LIMIT = int(os.environ.get('JOBS_AI_LIMIT', '40'))
 TIMEOUT = 300
 DESCRIPTION_CHARS = 1500
@@ -61,6 +63,15 @@ def clean_env():
     return {k: v for k, v in os.environ.items() if k not in drop and not k.startswith(prefixes)}
 
 
+def ranking_env(overrides):
+    # Pin this process to the requested subscription; ignore inherited billing/routing overrides.
+    env = {k: v for k, v in clean_env().items()
+           if not k.startswith(('ANTHROPIC_', 'OPENAI_', 'CODEX_', 'CLAUDE_CODE_', 'JOBS_CLAUDE_'))
+           and k not in ('CLAUDE_CONFIG_DIR', 'CLAUDE_AGENT_SDK_OAUTH_TOKEN', 'GOOGLE_API_KEY')}
+    env.update(overrides)
+    return env
+
+
 def profile_text():
     path = Path(os.environ.get('JOBS_PROFILE_FILE') or ROOT / 'profile.md')
     try:
@@ -98,14 +109,14 @@ def build_prompt(listings, o, profile):
     return '\n'.join(parts)
 
 
-def run_claude(prompt, runner=subprocess.run):
+def run_claude(prompt, runner=subprocess.run, env=None):
     cmd = ['claude', '-p', '--output-format', 'json', '--model', MODEL, '--effort', EFFORT,
            '--tools', '', '--no-session-persistence', '--strict-mcp-config', '--setting-sources', 'project',
            '--system-prompt', SYSTEM, '--json-schema', json.dumps(SCHEMA)]
     try:
         # An empty working directory keeps project settings, hooks and CLAUDE.md files out of the call.
         with tempfile.TemporaryDirectory() as cwd:
-            done = runner(cmd, input=prompt, capture_output=True, text=True, cwd=cwd, env=clean_env(), timeout=TIMEOUT)
+            done = runner(cmd, input=prompt, capture_output=True, text=True, cwd=cwd, env=env if env is not None else clean_env(), timeout=TIMEOUT)
     except FileNotFoundError:
         raise AIError('Claude Code is not installed on the service computer.')
     except subprocess.TimeoutExpired:
@@ -114,10 +125,48 @@ def run_claude(prompt, runner=subprocess.run):
         result = json.loads(done.stdout)
     except ValueError:
         raise AIError('Claude Code returned no result. Check that it is signed in on the service computer.')
+    if not isinstance(result, dict):
+        raise AIError('Claude Code returned an invalid ranking.')
     output = result.get('structured_output')
-    if result.get('is_error') or not isinstance(output, dict):
+    if done.returncode or result.get('is_error') or not isinstance(output, dict):
         raise AIError('Claude Code: ' + ' '.join(str(result.get('result') or 'no ranking returned').split())[:200])
     return output
+
+
+def run_codex(prompt, env, runner=subprocess.run):
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            schema, answer = Path(cwd) / 'schema.json', Path(cwd) / 'answer.json'
+            schema.write_text(json.dumps(SCHEMA))
+            cmd = ['codex', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+                   '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never',
+                   '-c', 'approval_policy="never"', '-c', 'forced_login_method="chatgpt"',
+                   '-c', 'cli_auth_credentials_store="file"', '-c', 'web_search="disabled"',
+                   '-c', f'model_reasoning_effort={json.dumps(EFFORT)}',
+                   '-c', 'features.shell_tool=false', '-c', 'features.unified_exec=false',
+                   '-c', 'features.apps=false', '-c', 'features.plugins=false',
+                   '-c', 'features.hooks=false', '-c', 'features.skip_host_skill_discovery=true',
+                   '-c', 'project_doc_max_bytes=0',
+                   '--output-schema', str(schema), '--output-last-message', str(answer)]
+            if CODEX_MODEL:
+                cmd += ['--model', CODEX_MODEL]
+            cmd += ['-']
+            done = runner(cmd, input=SYSTEM + '\n\n' + prompt, capture_output=True, text=True,
+                          cwd=cwd, env=env, timeout=TIMEOUT)
+            if done.returncode:
+                # CLI stderr can contain local config/credential details; keep it off the phone.
+                raise AIError('Codex ranking failed. Check the selected ChatGPT login and usage limits on the service computer.')
+            try:
+                output = json.loads(answer.read_text())
+            except (OSError, ValueError):
+                raise AIError('Codex returned no valid ranking.')
+            if not isinstance(output, dict):
+                raise AIError('Codex returned an invalid ranking.')
+            return output
+    except FileNotFoundError:
+        raise AIError('Codex is not installed on the service computer.')
+    except subprocess.TimeoutExpired:
+        raise AIError('Codex took longer than 5 minutes.')
 
 
 def verdict(row):
@@ -130,13 +179,21 @@ def verdict(row):
 
 
 def pick(jobs, o, cache, runner=subprocess.run):
-    """Adds Claude's verdict to the top jobs and puts them first. Returns (jobs, status)."""
+    """Add the selected engine's verdict to the top jobs. Return (jobs, status)."""
+    engine, subscription = o.get('ai_engine', 'claude'), o.get('ai_subscription', 'personal')
+    try:
+        overrides, identity = accounts.resolve(engine, subscription)
+    except accounts.AccountError as exc:
+        raise AIError(str(exc))
+    model = MODEL if engine == 'claude' else CODEX_MODEL or 'default'
     profile = profile_text()
-    context = hashlib.sha256(json.dumps([MODEL, EFFORT, profile, preferences(o)]).encode()).hexdigest()
+    context = hashlib.sha256(json.dumps([engine, subscription, identity, model, EFFORT, profile, preferences(o)]).encode()).hexdigest()
     shortlist = jobs[:LIMIT]
     todo = {f'j{i + 1}': j for i, j in enumerate(j for j in shortlist if (context, j['id']) not in cache)}
     if todo:
-        output = run_claude(build_prompt(todo, o, profile), runner)
+        prompt = build_prompt(todo, o, profile)
+        env = ranking_env(overrides)
+        output = run_claude(prompt, runner, env) if engine == 'claude' else run_codex(prompt, env, runner)
         for row in output.get('jobs', []):
             if isinstance(row, dict) and row.get('id') in todo:
                 cache[(context, todo[row['id']]['id'])] = verdict(row)
@@ -148,11 +205,12 @@ def pick(jobs, o, cache, runner=subprocess.run):
     for j in jobs:
         ai = cache.get((context, j['id'])) if j['id'] in listed else None
         if ai:
-            j['ai'] = dict(ai)
+            j['ai'] = dict(ai, engine=engine, subscription=subscription)
             ranked.append(j)
         else:
             rest.append(j)
     ranked.sort(key=lambda j: (VERDICTS.index(j['ai']['verdict']), -j['ai']['fit']))
-    status = dict(status='ok' if len(ranked) == len(shortlist) else 'partial', model=MODEL, ranked=len(ranked),
+    status = dict(status='ok' if len(ranked) == len(shortlist) else 'partial', model=model,
+                  engine=engine, subscription=subscription, ranked=len(ranked),
                   shortlist=len(shortlist), fresh=len(todo), message='' if profile else 'No profile file on the service.')
     return ranked + rest, status

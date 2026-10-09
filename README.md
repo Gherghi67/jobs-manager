@@ -59,17 +59,22 @@ The document icon in the top bar, next to the options icon, saves your CV from t
 - Saving again replaces the copy Fieldwork saved before rather than adding "CV (1).pdf". If another app already put a file with that name in Downloads, Android saves Fieldwork's copy under a numbered name, and the snackbar shows that name.
 - `GET /cv` returns the PDF with its file name and needs the access token. Saving uses Android's MediaStore, so it needs no storage permission. It requires Android 10 or newer; older phones get a message instead.
 
-## Claude ranking
+## AI ranking and subscriptions
 
-With **Let Claude rank the top roles** on (the default), the service sends the top 40 keyword matches to Claude Code on the Mac after fetching. Claude Code runs headless (`claude -p`) under your Claude login, so it uses your Claude subscription, not an API key. Claude returns a 0–100 fit, apply/maybe/skip, its own reading of Romania eligibility, and short reasons and concerns. Ranked roles come first, ordered by verdict and fit. The rest follow in keyword order.
+In **Options → Ranking**, turn on **Let AI rank the top roles**, choose **Claude Code** or **Codex**, then choose **Personal** or **Work** and tap **Save options**. The choice is saved on the phone and applies to the next search. It only changes job ranking; chats keep their existing login. **Check ranking accounts** reports whether each selected login is available on the service computer. It does not spend a model request or check remaining quota.
 
-- Claude must be installed and signed in on the Mac (`claude` on the service's `PATH`). **Test connection** reports whether it was found.
-- Your profile is read from `backend/profile.md`, which git ignores. `JOBS_PROFILE_FILE` points elsewhere. Without a profile, Claude judges against the app's preferences only.
-- `JOBS_AI_MODEL` (default `opus`), `JOBS_AI_EFFORT` (default `medium`) and `JOBS_AI_LIMIT` (default `40`) tune the call. Descriptions are cut to 1,500 characters per listing.
-- The call has no tools, MCP servers, user settings, hooks or saved session. It runs in an empty temporary folder. It drops `ANTHROPIC_API_KEY` and Claude Code session variables from its environment, so a key exported in your shell cannot redirect it to API billing.
-- Verdicts are cached in service memory per listing, profile and preferences, so a repeated search only sends new listings. A live run of 40 listings with Opus took about 50 seconds.
-- If Claude fails (not installed, signed out, usage limit, timeout), the search still completes with keyword ranking, and the app says why.
-- Your profile and the listings are sent to Anthropic, as in any Claude conversation. Claude's eligibility reading comes from listing text, like the keyword labels; confirm with the employer.
+The service sends the top 40 keyword matches to the chosen CLI under its subscription login. It returns a 0–100 fit, apply/maybe/skip, Romania eligibility, reasons and concerns. Cards and details name the engine that actually ranked the listing, including saved results from earlier searches. The ranking summary names the subscription too. If the selected login is unavailable or hits a limit, keyword results still appear with an explanation; the service never switches to another subscription automatically.
+
+- **Claude:** by default, uses saved logins from the local Agents sidebar account store: `Personal` for Personal, and `Work` or the existing `ERPK` nickname for Work. `JOBS_CLAUDE_PERSONAL_ACCOUNT` and `JOBS_CLAUDE_WORK_ACCOUNT` override the aliases or stored account IDs. Alternatively, `JOBS_CLAUDE_PERSONAL_TOKEN_FILE` and `JOBS_CLAUDE_WORK_TOKEN_FILE` can point to private files holding subscription tokens from `claude setup-token`. Credentials stay on the computer and never enter the phone's settings. Expired saved logins must be renewed on the computer.
+- **Codex:** uses `JOBS_CODEX_PERSONAL_HOME` and `JOBS_CODEX_WORK_HOME` for separate signed-in CLI folders. Without these settings, the default `~/.codex/auth.json` is accepted only when its ChatGPT plan matches the selected Personal or Work category. API-key logins are rejected. This integration uses Codex file credential storage.
+- To set up a separate Codex Work login, run `env CODEX_HOME="$HOME/.codex-work" codex -c 'cli_auth_credentials_store="file"' login`, sign into the work account/workspace, then start the service with `JOBS_CODEX_WORK_HOME="$HOME/.codex-work" ./scripts/serve.sh`. The same pattern works for Personal with a separate folder. Explicit home mappings identify the intended account, so verify which workspace you sign into. See [Codex authentication](https://learn.chatgpt.com/docs/auth).
+- The current machine has Claude Personal, Claude Work and Codex Personal logins available. Codex Work requires a separate login to be configured.
+- `JOBS_AI_MODEL` (Claude, default `opus`), `JOBS_CODEX_MODEL` (Codex, default its CLI model), `JOBS_AI_EFFORT` (default `medium`) and `JOBS_AI_LIMIT` (default `40`) tune ranking. Descriptions are cut to 1,500 characters per listing.
+- Your profile is read from `backend/profile.md`, which git ignores. `JOBS_PROFILE_FILE` points elsewhere. Without a profile, the engine uses the app's preferences only.
+- Ranking runs in an empty temporary folder. Claude has no tools, MCP servers, user settings, hooks or saved session. Codex ignores user config and rules, uses read-only execution with shell, apps, plugins, hooks and web search disabled, and does not persist its session. Inherited API keys and provider-routing variables are removed from ranking processes.
+- Verdict caches are separated by engine, subscription, account identity, model, profile and preferences. Changing the selection cannot reuse another account's rankings. Source-fetch caches remain shared.
+- Your profile and listings are sent to the selected provider. Eligibility is inferred from listing text; confirm it with the employer.
+- `GET /ranking/accounts` returns the four engine/subscription combinations and public status messages. It requires the service access token and never returns credentials.
 
 ## Applied jobs
 
@@ -167,3 +172,29 @@ The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`
 - `~/Documents/jev-dating/` and the Codex chat “Explore Jev for automatic swipes”: local preference and choice workflow, duplicate handling, and explicit separation between your decisions and model estimates. The app adopts local save/dismiss decisions without importing dating profiles or credentials.
 
 Provider results remain attributed and link to their original listings. See [Adzuna API](https://developer.adzuna.com/overview), [Himalayas API](https://himalayas.app/api), and [Flutter Android build documentation](https://docs.flutter.dev/deployment/android).
+
+## Daily Gmail sync
+
+The service runs a read-only Gmail sweep every 24 hours, even when the phone is closed. `scripts/sync_gmail.sh` asks the running service to run if due; it cannot force additional subscription requests. The scheduler starts with `scripts/serve.sh`, catches up when the server returns after downtime, and records attempts before contacting Claude so restarts or failures cannot create a quota loop. Keep the server running and the Mac awake.
+
+Configuration lives in private, gitignored `backend/gmail-sync-config.json`:
+
+```json
+{
+  "mailbox": "your-personal-mailbox@gmail.com",
+  "claude_account_email": "your-claude-login@example.com",
+  "model": "sonnet",
+  "enabled": true
+}
+```
+
+Optional `claude_org_id` pins the Claude workspace. Optional `start_after` is an ISO timestamp for the first run. This installation is configured for the existing personal Gmail and Claude Max account, with the first sweep at **22:25 Europe/Bucharest on October 9, 2026**, after the reported 22:20 subscription reset. Subsequent runs are 24 hours apart. Disabling `enabled` takes effect without a restart.
+
+- Claude Code uses its normal subscription login and credential refresh. The job strips inherited API keys and billing overrides, checks the configured account before each run, and never switches subscriptions automatically. Gmail must remain connected in that account's Claude Code session. If it expires, reconnect Gmail with `/mcp`; the next job creates a fresh process.
+- Only Gmail `search_threads` and `get_thread`, tool discovery and structured output are permitted. A deny-by-default tool hook blocks sending, deleting, modifying mail, filesystem tools and other connectors. User/project settings and hooks are excluded. Email content is treated as untrusted data. See [Claude Code permissions](https://code.claude.com/docs/en/permissions) and [Claude.ai connectors](https://code.claude.com/docs/en/mcp#use-mcp-servers-from-claudeai).
+- The first sweep covers 30 days. Later sweeps start two days before the last successful sweep, catching delayed indexing and outages. The model searches application confirmations and replies across categories, Sent and Spam, with pagination. Incomplete sweeps, a mismatched mailbox, ambiguous application matches or invalid evidence leave the list unchanged and report an error.
+- Imports preserve manual notes, follow-up dates and company matching preferences. Message IDs prevent duplicates; earlier messages cannot replace newer statuses. A validation pass against an in-memory copy precedes one atomic write, with a private `backend/applied.json.before-gmail` backup. The list retains its existing limit of 100 email summaries per application; full email bodies are not saved by the app. Classification is inferred by Claude and should be checked against email when a status looks wrong.
+- `GET /applied` includes `gmail_sync` status alongside the list. `GET /gmail-sync` reports the last attempt, last success, next run and any error. Authenticated `POST /gmail-sync` or `./scripts/sync_gmail.sh` starts a due check without waiting for the model. `backend/gmail-sync-state.json` is private and must be retained across restarts.
+- The Applied tab's analytics download the saved application list once per 24 hours, on app launch/resume or while open. The fetch timestamp and data are cached across restarts; offline failures retain the last data and retry at most hourly while open. Pull to refresh fetches immediately, without spending an LLM request. Android does not need to run a background Gmail job.
+
+Verification: 186 backend tests and 38 Flutter tests pass; Flutter analysis is clean. Coverage includes daily cadence/restarts, locking, subscription selection, tool restrictions, failure recovery, duplicate imports, atomic writes, authenticated endpoints and daily UI caching. Build 29859405 is published; the active schedule and APK metadata were verified through localhost and the phone’s Tailscale address. The restricted runtime successfully loads the Gmail connector. The first live model check reached the Claude subscription limit; a successful live Gmail import is still pending the scheduled run.

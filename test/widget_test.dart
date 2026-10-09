@@ -210,13 +210,13 @@ void main() {
     await tester.tap(find.text('Connect your job service'));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('Let Claude rank the top roles'),
+      find.text('Let AI rank the top roles'),
       200,
       scrollable: find.byType(Scrollable).first,
     );
     final tile = find.widgetWithText(
       SwitchListTile,
-      'Let Claude rank the top roles',
+      'Let AI rank the top roles',
     );
     expect(tester.widget<SwitchListTile>(tile).value, isTrue);
     expect(tester.takeException(), isNull);

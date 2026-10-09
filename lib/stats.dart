@@ -232,3 +232,39 @@ String daysLabel(double days) => days < 1
     : days.round() == 1
     ? '1 day'
     : '${days.round()} days';
+
+// Successful reads survive restarts; offline attempts retry at most hourly.
+bool dailyRefreshDue(DateTime? fetched, DateTime? attempted, DateTime now) {
+  if (attempted != null &&
+      !attempted.isAfter(now) &&
+      now.difference(attempted) < const Duration(hours: 1)) {
+    return false;
+  }
+  return fetched == null ||
+      fetched.isAfter(now) ||
+      now.difference(fetched) >= const Duration(days: 1);
+}
+
+String gmailSyncLabel(Map<String, dynamic> sync, DateTime? fetched) {
+  final success = DateTime.tryParse((sync['last_success'] ?? '').toString());
+  String shortDate(DateTime value) =>
+      value.toLocal().toString().substring(0, 16);
+  final last = success == null
+      ? ''
+      : ' Last Gmail sync: ${shortDate(success)}.';
+  final error = (sync['error'] ?? '').toString();
+  if (sync['running'] == true) {
+    return 'Checking Gmail on the server.$last Pull to refresh after it finishes.';
+  }
+  if (error.isNotEmpty) {
+    return 'Gmail sync needs attention: $error$last';
+  }
+  if (sync['enabled'] == true) {
+    final next = DateTime.tryParse((sync['next_run'] ?? '').toString());
+    if (success == null && next != null) {
+      return 'First Gmail sync scheduled for ${shortDate(next)}. Analytics refresh daily when the app is open. Pull to refresh anytime.';
+    }
+    return 'Gmail syncs daily.$last Analytics refresh daily when the app is open. Pull to refresh anytime.';
+  }
+  return 'Analytics refresh daily when the app is open.${fetched == null ? '' : ' Fetched: ${shortDate(fetched)}.'}';
+}

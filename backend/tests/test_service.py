@@ -315,7 +315,7 @@ class ApiTests(unittest.TestCase):
             return json.load(r)
     def test_applied_endpoints(self):
         row = s.rank([job()], s.validate_options({}))[0]
-        self.assertEqual(self.call('GET', '/applied'), {'jobs': []})
+        self.assertEqual(self.call('GET', '/applied'), {'jobs': [], 'gmail_sync': {'enabled': False}})
         self.assertEqual(self.call('POST', '/applied', row)['job']['id'], row['id'])
         self.assertEqual([j['id'] for j in self.call('GET', '/applied')['jobs']], [row['id']])
         with self.assertRaises(HTTPError) as e:
@@ -340,11 +340,30 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('DELETE', '/applied/' + entry['id']), {'removed': True})
         self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': True})
         self.assertEqual(self.call('DELETE', '/applied/' + row['id']), {'removed': False})
-        self.assertEqual(self.call('GET', '/applied'), {'jobs': []})
+        self.assertEqual(self.call('GET', '/applied'), {'jobs': [], 'gmail_sync': {'enabled': False}})
+
+    def test_gmail_status_and_trigger_require_auth(self):
+        for method in ('GET', 'POST'):
+            with self.assertRaises(HTTPError) as exc:
+                self.call(method, '/gmail-sync', {} if method == 'POST' else None, token=False)
+            self.assertEqual(exc.exception.code, 401)
+        self.assertEqual(self.call('GET', '/gmail-sync'), {'enabled': False})
+        with self.assertRaises(HTTPError) as exc:
+            self.call('POST', '/gmail-sync', {})
+        self.assertEqual(exc.exception.code, 503)
     def test_authentication_required(self):
         with self.assertRaises(HTTPError) as e:
             urlopen(self.url + '/health')
         self.assertEqual(e.exception.code, 401)
+    def test_ranking_accounts_requires_auth_and_returns_public_catalog(self):
+        rows = [dict(engine='codex', subscription='work', available=False, message='Needs login')]
+        with patch.object(s.ai.accounts, 'catalog', return_value=rows) as catalog:
+            with self.assertRaises(HTTPError) as e:
+                self.call('GET', '/ranking/accounts', token=False)
+            self.assertEqual(e.exception.code, 401)
+            catalog.assert_not_called()
+            self.assertEqual(self.call('GET', '/ranking/accounts'), {'accounts': rows})
+
     def test_health_and_invalid_request(self):
         headers = {'Authorization': 'Bearer ' + self.token}
         with urlopen(Request(self.url + '/health', headers=headers)) as r:
