@@ -64,6 +64,7 @@ The main implementation is in `lib/`, `backend/service.py`, and `scripts/serve.s
 - Live Adzuna verification fetched 50 listings. Remotive and Himalayas fetched 63 combined.
 - A search initiated in the Android emulator called all three selected sources and displayed 12 matching fully remote roles with Romania/Europe/worldwide eligibility. The other adapters have regression coverage but were not all live-tested in this run.
 - A second emulator pass covered connection testing, a live search, save/dismiss/restore, persistence across restart, the results filter, and an unreachable service. The rebuilt APK fixed four display issues found in that pass: raw network exceptions, singular counts ("1 opportunity"), the lowercase Adzuna source name, and the source count shown during a search.
+- A clean-install retest of the committed APK used the default options and live-tested Adzuna and all eight remote boards: Adzuna 600, Remote OK 414, Jobicy 269, We Work Remotely 142, Hacker News 127, Himalayas 96, Arbeitnow 63, Working Nomads 54 and Remotive 34 listings, giving 80 matching roles in under two minutes. The gaming preset's studio boards were not live-tested.
 - Screenshots are in `artifacts/`. No physical phone was connected during verification.
 
 ## Reference provenance
