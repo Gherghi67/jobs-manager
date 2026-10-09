@@ -15,3 +15,256 @@ Outputs: `artifacts/fieldwork.apk` (release compilation, local development signi
 No Git repository, commits, PR, hosting deployment, or CS registration was created. The user requested plain wrap; no continuation chat was requested. Save local `.cs` handoff records, then attempt the available CS narrative rotation once.
 
 Wrap saved the durable memory and `.cs/summary.md`. The single rotation attempt exited 1 with: `Error: cs -narrative rotate must be run from inside a cs session`. No narrative sections were archived or deleted. No continuation chat or wrapped marker was created.
+
+## 2026-10-09 15:10–15:18 — Emulator test pass (adopted cs session)
+
+User asked to test the app on an Android emulator. Booted `Pixel_7_API_34_arm64` (emulator-5554), installed `artifacts/fieldwork.apk` (no source changes since its build), `adb reverse tcp:8765 tcp:8765`. Service already running (PID 57658), `/health` → `adzuna_configured: true`. App data from the earlier install persisted (token, bounded TypeScript query: Adzuna + Remotive + Himalayas).
+
+Checks: `flutter analyze` clean, 6 Flutter tests and 110 Python tests pass. In the emulator: Test connection → "Connected. Adzuna credentials are ready."; live search 3/3 sources (Adzuna 50, Remotive 34, Himalayas 29) → 12 matches; detail sheet with match reasons/salary/attribution; Open original listing launches Chrome; save, dismiss (12→11), Saved/Dismissed tabs, restore (→12); state survives force-stop + relaunch; results filter ("Xperteez" → 2); with adb reverse removed the search fails and keeps cached results; recovered after reconnect. No FATAL/AndroidRuntime/flutter errors in logcat.
+
+Findings, none fixed (only reported): (1) the unreachable-service error shows raw Dart text, "ClientException with SocketConnection refused … port = 38470" (`lib/main.dart:193`); (2) labels read "1 saved roles" / "1 opportunities" (`lib/main.dart:546`); (3) the source panel shows lowercase "adzuna" because `boardNames` lacks it (`lib/main.dart:518`); (4) mid-search the panel read "2/2 sources responded" while Himalayas was still fetching (`lib/main.dart:502`). Gotcha: `adb shell monkey` launch exited -5 right after boot; `am start -n dev.bogdan.jobs_manager/.MainActivity` works. Screenshots are in the conversation scratchpad, not artifacts/.
+
+## 2026-10-09 15:19–15:26 — Fixed the four emulator findings
+
+User said yes to fixing them. Changes: `lib/models.dart` adds `sourceNames` (Adzuna + boards + gaming studio boards), `sourceName()` and `plural()`; `lib/api.dart` maps `http.ClientException` / `TimeoutException` / non-JSON bodies to readable messages (USB adb hint only for localhost URLs); `lib/main.dart` uses them for attribution, the source panel, progress text ("Fetching Himalayas"), and counts ("1 opportunity", "1 saved role", "N dismissed roles"; the Dismissed tab used to say "opportunities"); the source panel shows "x/total sources checked" while busy and uses the run's planned total afterwards. `backend/service.py` run state now carries `total` (planned sources) and `source` (current key); `current` is unchanged for compatibility.
+
+Tests: 10 Flutter tests (added 3 API-error tests and 1 label widget test), 110 Python tests (partial-failure test asserts total/source), analyze clean. Rebuilt the release ARM64 APK and copied it to `artifacts/fieldwork.apk` (18.4 MB); README verification section updated.
+
+Emulator check: "Adzuna | 50 listings", "Fetching Himalayas · 84 collected" with "2/3 sources checked" mid-search → "3/3 sources responded", 12 results; "1 saved role" / "1 dismissed role" / "0 … roles"; unreachable → "Cannot reach the service at http://127.0.0.1:8765. Check that scripts/serve.sh is running …". No logcat errors. Saved/dismissed state ended as it started (nothing saved or dismissed).
+
+Runtime gotcha: the original service on 8765 (PID 57658) was started by a Codex app-server session and still runs the old service.py; I left it alone. Port 8766 is used by another unrelated python process. The updated service runs on port 60766 (PID 59433, started via scripts/serve.sh --port) and the emulator's adb reverse maps device 8765 → host 60766, so the app config is unchanged. Nothing committed.
+
+## 2026-10-09 15:26–15:38 — Committed and retested
+
+Branched `fieldwork-app` off `main` (harness rule: never commit on the default branch) and committed the whole app plus fixes as `26e5130` (45 files; .cs/ left to cs). No remote exists. README retest note committed separately on the same branch.
+
+Clean-install retest of `artifacts/fieldwork.apk` (sources unchanged since build; `adb uninstall` + install): first launch shows "Connect your job service" and defaults (Adzuna + 8 boards). Test connection: empty token → "Connection failed…", real token → "Connected. Adzuna credentials are ready." Default search (all nine sources live) in 111 s: Adzuna 600, Remote OK 414, Jobicy 269, WWR 142, HN 127, Himalayas 96, Arbeitnow 63, Working Nomads 54, Remotive 34 (cached) → 80 roles; progress read "Fetching Remote OK … 2/9 sources checked" through "8/9", then "9/9 sources responded". Save, dismiss (also removes from Saved), restore, persistence across force-stop, "python" filter 80→56→80, Open original listing → Chrome, unreachable service → readable message with cached results kept, reconnect → 9/9 again. No logcat crashes. App ends with nothing saved/dismissed, 80 results cached.
+
+Automation gotcha: pressing BACK in the Discover tab with the keyboard closed exits the app; use KEYCODE_ESCAPE to dismiss the keyboard. Locate the filter field via the EditText bounds in the uiautomator dump.
+
+Merged `fieldwork-app` into `main` by fast-forward (main now at 4eb4e1d). The branch is kept; nothing pushed (no remote).
+
+## 2026-10-09 15:40–15:50 — Q&A: sources and real-phone use (no code changes)
+
+Explained the sources: Adzuna (needs keys; countries us/gb/de/nl/pl/at/es/fr) plus the 8 public boards in `PUBLIC_SOURCES` (`backend/service.py:24`), with the gaming preset adding studio ATS boards (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, Teamtailor) from `gaming_config.json`. The app can't toggle the studio boards individually (`backend/service.py:215`).
+
+Real phone: today it only works over USB with `adb reverse`, and it has never been run on a physical phone. LAN HTTP is blocked by `network_security_config.xml`. For untethered use I recommended Tailscale Serve (private ts.net HTTPS, no app change, Mac must be awake); the alternatives are Cloudflare Tunnel/Funnel (public) or a small HTTPS host (independent of the Mac). Locking the Mac is fine; sleep or logout breaks it. Suggested `caffeinate -is scripts/serve.sh` and noted that closing a MacBook lid still sleeps it unless it's on power with an external display. Offered (not done): Tailscale or host setup, and building caffeinate into serve.sh.
+
+## 2026-10-09 15:50–16:00 — Tailscale Serve + caffeinate (in progress)
+
+User picked Tailscale Serve with caffeinate. `scripts/serve.sh` now starts `caffeinate -is -w $$ &` before `exec python3`. Because exec keeps the PID, caffeinate's assertions (PreventUserIdleSystemSleep, plus PreventSystemSleep, which only applies on AC power) last exactly as long as the service. Verified on port 60799: the assertions were "on behalf of" the service PID, and caffeinate exited when the service was killed with SIGTERM. Test gotcha: a service started with `&` from a non-interactive shell ignores SIGINT, so use SIGTERM in tests; Ctrl+C in a real terminal is unaffected. README gained a "Without the cable (Tailscale Serve)" section, and the old "deploy behind HTTPS / not provisioned" sentence was removed.
+
+Blocked: `brew install --cask tailscale-app` (1.104.1) runs a pkg installer through sudo, which can't prompt without a TTY, so the user must install it. Port 8765 is still held by PID 57658 (old service.py, started by Codex) and my PID 59433 is on 60766. Both need stopping before `serve.sh` on 8765 plus `tailscale serve --bg 8765`. Nothing committed; we're on `main`.
+
+## 2026-10-09 16:00–16:10 — Tailscale up, Serve awaiting approval
+
+The user installed Tailscale, and `tailscale status` shows `macbook-pro-2` and `pixel-10-pro` on the same tailnet. Stopped PIDs 57658 and 59433. The new `serve.sh` service is on 8765 with caffeinate attached.
+
+Correction to the 15:50 entry: the first restart had `adzuna_configured: false` because `ags` is gone. It was renamed `code-sessions` (`~/.local/bin/code-sessions`, alias `ccs`); a wrapper runs the fork with its own encrypted secrets dir. Plain `cs` says "secret not found" for the `wap-ags` store. `serve.sh` now tries code-sessions → ccs → ags, and `/health` reports `adzuna_configured: true`. Slip: a diagnostic of mine (`2>&1 >/dev/null`) printed the Adzuna app ID (not the key) to the transcript, which suggests code-sessions echoes the value on stderr. Told the user; rotating it is optional.
+
+`tailscale serve --bg 8765` stopped at "Serve is not enabled on your tailnet" with an approval link. The command is still waiting in the background (output in `$TMPDIR/ts-serve.log`). Next: confirm `tailscale serve status`, curl `/health` through the ts.net URL, and have the user enter the URL in the app.
+
+## 2026-10-09 16:10–16:20 — Serve live; Taildrop to phone pending
+
+The user approved Serve, and the background `tailscale serve --bg 8765` finished. The service is at `https://macbook-pro-2.tailaedfae.ts.net` (tailnet only), proxying to `http://127.0.0.1:8765`. From the Mac: `/health` with the token → 200, `adzuna_configured: true`; without the token → 401. The Let's Encrypt cert verifies and is valid until 2027-01-07.
+
+The Pixel was never on USB (adb only sees emulator-5554). The token is 43 characters. The user chose Taildrop: `tailscale file cp fieldwork.apk fieldwork-token.txt pixel-10-pro:`, sent from scratchpad copies (`$SP/taildrop/`, token copied with umask 077). It stalled at about 570 KB transmitted while the phone was reachable directly (ping 11 ms). Likely cause: Android Tailscale's first-receive prompt to choose a save folder. It runs as background task bhfb76fca, and the compound command deletes the scratch token copy only after the transfer ends. If the task is killed, delete `$SP/taildrop/fieldwork-token.txt` by hand. Pending: phone install, Options URL/token, Test connection.
+
+## 2026-10-09 16:20–16:30 — Taildrop abandoned; APK link handed to user
+
+Correction to the 16:10 entry: Taildrop to the Pixel never completed. It stuck at about 578 KB, and no notification or folder prompt appeared on the phone. I killed `tailscale file cp`. The compound command then deleted the scratch token copy, which I confirmed; only `$SP/taildrop/fieldwork.apk` remains.
+
+The auto-mode classifier denied, as [Credential Leakage], serving files over `tailscale serve --set-path` from a localhost `http.server`. It denied the first attempt, which included token.txt, and also the retry with only the APK. I did not work around it. I gave the user `!` commands to run themselves: `http.server 8790` over `artifacts/` plus `tailscale serve --bg --set-path /fieldwork http://127.0.0.1:8790`, giving the phone URL `https://macbook-pro-2.tailaedfae.ts.net/fieldwork/fieldwork.apk`. For the token I suggested `pbcopy < backend/.access-token` into a password manager, then paste on the phone. Cleanup is owed after install: `tailscale serve --https=443 --set-path /fieldwork off`, kill the 8790 server, and remove the `$SP/taildrop` APK copy.
+
+## 2026-10-09 16:30–16:40 — APK link live (user-run)
+
+The user ran the `!` command, which combines the http.server on 8790 over `artifacts/` with `tailscale serve --bg --set-path /fieldwork`. `https://macbook-pro-2.tailaedfae.ts.net/fieldwork/fieldwork.apk` now returns 200 with the full 18,438,427 bytes as `application/vnd.android.package-archive`, and `/` still proxies to 8765. Once, at the user's request, I put the token on the clipboard with `pbcopy` (not printed). It was then overwritten when I copied the command. I explained the token to the user: it is the service's own bearer secret (`secrets.token_urlsafe(32)` in `backend/.access-token`, 0600, or `JOBS_ACCESS_TOKEN`); delete the file and restart to rotate it. Pending: phone install and Test connection; afterwards remove `/fieldwork`, stop 8790, and delete the `$SP/taildrop` APK copy.
+
+## 2026-10-09 16:40–16:50 — Token handling
+
+At the user's request I opened `backend/.access-token` in TextEdit (`open -e`) rather than printing it. The user then ran `! cat` themselves, so the token value is now in this conversation's transcript. If they want a clean one, rotate it (delete the file and restart serve.sh). The user asked me to email the token to their personal address. While I was preparing, the classifier denied a `tailscale status --json` login-name lookup as [Credential Leakage]. I did not send anything through Gmail and did not work around the denial; the personal address was also unknown. The user ran `! pbcopy < backend/.access-token` to email it to themselves. Pending, unchanged: phone install and Test connection, then `/fieldwork` teardown, stopping the 8790 server, and removing the `$SP/taildrop` APK copy.
+
+## 2026-10-09 16:50–17:00 — Q&A: no LLM today; proposal for Claude ranking via subscription
+
+Confirmed that the backend makes zero LLM calls: it is stdlib-only, and ranking is the keyword Scorer plus regex location labels. The only "claude/anthropic/llm" strings are search keywords in `broad_remote_config.json`.
+
+The user asked whether their Claude subscription could pick jobs better. Proposed: keep the keyword pre-filter (top ~50), then make one `claude -p` call per search with `--json-schema` (per-job fit 0–100, apply/maybe/skip, reasons, concerns, Romania eligibility judged from the description), cache it, and add an "AI pick" toggle in the app. Local Claude Code is 2.1.295, and its help lists `-p`, `--json-schema`, `--model`, `--effort`, `--system-prompt`, `--tools`, `--no-session-persistence` and `--setting-sources`. Gotcha: `--bare` cannot use a subscription (auth is strictly ANTHROPIC_API_KEY/apiKeyHelper, and OAuth/keychain are never read). So isolate the call instead: neutral cwd, no tools, skip user settings so the global cs/sidebar hooks don't fire, and no session persistence. Verify that the hooks are actually skipped when building. A profile source exists at `~/Documents/cv-refactor/Bogdan-Gherghina-CV.txt`. Awaiting decisions: build or not, Opus vs Sonnet, CV vs preferences only. Nothing built.
+
+## 2026-10-09 17:00–17:50 — Built Claude ranking (subscription)
+
+The user said "go with my subscription" without choosing a model or a profile source. I chose Opus at medium effort (configurable through `JOBS_AI_MODEL`, `JOBS_AI_EFFORT` and `JOBS_AI_LIMIT`), with the CV plus preferences as the profile.
+
+- **New `backend/ai_pick.py`.** It runs `claude -p --output-format json --json-schema … --tools "" --no-session-persistence --strict-mcp-config --setting-sources project` with the system prompt, in an empty temp cwd. The env drops `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDECODE`, `CLAUDE_EFFORT` and anything prefixed `CLAUDE_CODE_*`, `CLAUDE_SESSION_*`, `CLAUDE_COWORK_*` or `CS_*`. The output is read from `structured_output`. Listings go in as `j1..jN` with descriptions cut to 1,500 chars. Verdicts are cached per (model, effort, profile, preferences, job id), capped at 2,000 entries. Sort is verdict, then fit; the shortlist is the top 40.
+- **`service.py`.** New option `ai_pick` (default true); the step runs after all sources, on a deepcopy. `AIError` messages are shown, other exceptions get a generic message. `/health` gains `claude_available`.
+- **App.** `ai_pick` toggle under a new "Ranking" heading, a "Claude N · Verdict" pill, the top reason on each card, a "CLAUDE'S TAKE" section in details, an `aiSummary` status line persisted as the `ai` pref, and a Test connection note.
+- **Probe findings.** The `ANTHROPIC_API_KEY` exported in this shell is invalid and caused 401s until stripped. With it stripped, `apiKeySource` is `none` (OAuth). stream-json init showed only the StructuredOutput tool and no MCP servers, with no hook events.
+- **Tests.** 122 Python (12 new in `test_ai_pick.py`, all with a fake runner), 12 Flutter, analyze clean. Widget-test gotcha: tapping the card title hit the NavigationBar, so tap the reason line after `ensureVisible`.
+- **Live checks.** A three-listing Opus run took 6 s with sensible verdicts. The full default search through ts.net fetched 1,794 listings, ranked 40 in about 51 s, and returned 79 roles; top picks were Proxify Node/Nest (85), Mastra AI Engineer (80) and Axmed (78). The emulator run on the new APK reused the cached verdicts (15 s), and the screenshots look right.
+- **Deployed state.** The rebuilt APK is copied to `artifacts/fieldwork.apk`, so the `/fieldwork` link serves it. The service was restarted (PID 22421, nohup from this shell). `backend/profile.md` was created and is gitignored. README has a "Claude ranking" section. Nothing committed; still on `main`.
+
+## 2026-10-09 17:50–18:10 — In-app update button
+
+I read the user's "button in the app that updates from the server" as an in-app update, not a results refresh, since we had just told them to reinstall through the link. I didn't ask.
+
+- **Service.** `APP_DIR = repo/artifacts`. `GET /app` reads `fieldwork.json` for version_code and version_name, plus size and a sha256 cached by mtime/size. `GET /app/fieldwork.apk` streams the file. Both are authed.
+- **`scripts/build_apk.sh`.** Runs `--build-number $(date +%s)/60`, then does an atomic cp+mv of the APK and then the JSON. The APK goes first so `/app` never advertises a version whose APK isn't there yet.
+- **`MainActivity.kt`.** MethodChannel `fieldwork/update` with info, openInstallSettings and install. install runs on a background thread: SHA-256 check, a PackageInstaller session with MODE_FULL_INSTALL, and a commit with a mutable PendingIntent back to the activity. onNewIntent handles PENDING_USER_ACTION by starting the confirm intent; failures go to Dart through `installFailed`. API 26 guards are in place because minSdk is 24. Manifest has REQUEST_INSTALL_PACKAGES.
+- **Dart.** `JobsApi.download` streams with progress and incomplete or stall errors. `lib/updater.dart` holds the channel wrapper, `isNewer` and `buildLabel`. The Options "App updates" section moves through check → "Build N is ready." → Install build N → progress → install. If install permission is missing, it opens the setting.
+- **Tests.** 123 Python (1 new endpoint test) and 16 Flutter (download, version and options tests), analyze clean.
+- **Emulator end-to-end.** A → B worked: latest-build message, settings toggle (the app is not killed by the toggle), Android update dialog about 2 s after tapping, versionCode then 29859244, data intact. Android returns to the launcher after updating.
+- **zsh gotcha.** `$ADB` holding a command with args doesn't word-split in zsh; use a shell function.
+
+The phone still runs the pre-Claude build (versionCode 1). It needs one manual install from `/fieldwork/fieldwork.apk` (now build 29859244, which includes the Claude ranking and the updater). After that the button covers updates. The service was restarted again (new endpoints). Nothing committed.
+
+## 2026-10-09 18:10–18:20 — Security fix: install intent redirection
+
+An automated security review flagged MainActivity: an exported launcher activity whose onNewIntent started the nested EXTRA_INTENT, so any app could make Fieldwork launch arbitrary intents.
+
+Fix: `PendingIntent.getBroadcast` to the new `InstallStatusReceiver`, declared `exported="false"` in the manifest (confirmed with aapt2). A synchronized set records the session ids MainActivity creates, and the receiver ignores any other id. For PENDING_USER_ACTION the nested intent's action must be `android.content.pm.action.CONFIRM_INSTALL`; URI grant flags are stripped and NEW_TASK is added. Failures reach Dart through the companion `MainActivity.channel`; onNewIntent was removed.
+
+A shell `am broadcast` to the receiver isn't proof of denial, because the shell uid may be privileged, but the session check would drop it anyway. Re-verified on the emulator: 29859248 → 29859249 through the button, the dialog after about 2 s, no BAL blocks or crashes, data intact. `artifacts/fieldwork.apk` is now build 29859249 (includes the fix).
+
+## 2026-10-09 18:20 — Committed; wrap
+
+Committed all project changes as `754bb95` on the new branch `claude-ranking-app-updates`, off `main` at 4eb4e1d. That covers Claude ranking, in-app updates with the security fix, serve.sh caffeinate and the secrets-CLI rename, plus the README. It is not merged and not pushed (there is no remote). The secret scan of tracked files for the access token and Adzuna ID found nothing.
+
+Still open:
+- The phone still runs build 1 and needs a one-time manual install of 29859249 from `/fieldwork/fieldwork.apk`.
+- After that: `tailscale serve --https=443 --set-path /fieldwork off`, stop the user-started `http.server` on 8790, and delete `$SP/taildrop`.
+- The service runs from this shell via nohup; the user should run `./scripts/serve.sh` in their own Terminal.
+- Follow-up task #1: a guard test for the installer intent rule.
+
+## 2026-10-09 17:18–17:40 — Applied jobs stored on the service
+
+User asked to save the jobs they applied to on the server so Claude doesn't show them again. Built it without asking. My calls: applied roles are hidden from results entirely, not just from Claude's ranking, and there is an Applied tab.
+
+- **Service.** `AppliedStore` in `backend/service.py` keeps `backend/applied.json` (gitignored as `backend/applied.json*`, 0600, atomic replace, `JOBS_APPLIED_FILE` overrides). An unreadable file raises `StoreError` and is never overwritten. Endpoints: `GET /applied`, `POST /applied` (64 KB body, whitelisted fields, description capped at 6,000 characters, idempotent so the first `applied_at` is kept), `DELETE /applied/<id>` → `{removed}`. `Engine.run` calls `applied.exclude(rank(...))` after each source, so the filter runs before `ai.pick` and Claude never sees applied roles. The run state reports `applied_hidden`. Matching uses any of three keys: listing id, URL (scheme, www and fragment stripped, lowercased) or `dedupe_key` company|title, the last only when the company is non-empty. `Engine(applied=None)` takes a store so tests don't touch the real file.
+- **App.** A fourth tab (Discover, Saved, Applied, Dismissed; Dismissed is now index 3). The card has a check icon toggle, and the details sheet has a "Mark as applied" button. Marking applied removes the role from saved and dismissed. The local `applied` pref is a cache of the server list. `syncApplied` runs on load, on the Applied tab and after Options, and discards its result if a toggle happened mid-flight (`appliedVersion`). The snackbar offers Undo. `JobsApp(httpClient:)` exists for widget tests, and `JobsApi.request(delete: true)` sends DELETE.
+- **Tests.** 131 Python (8 new) and 19 Flutter (3 new). Analyze is clean. Gotcha: test fixtures share the URL `https://example.com/job`, so URL matching hides every copy; give distinct URLs.
+- **Live checks.** On a temp instance (port 60811, temp token and file), real Remotive + Himalayas returned 11 roles, then 10 with 1 hidden after marking, then 11 after DELETE. Restarted the real service via nohup `scripts/serve.sh` (old PID 83935 → 96139, caffeinate attached). `/applied` and DELETE work through ts.net. On the emulator, 29859265 was installed with adb; marking took Discover from 79 to 78 and the server got the record, and unmarking restored both. Then I hid the "Cached" label on the Applied tab and published **29859270** (installed on the emulator as well). The real applied list was left empty.
+- zsh gotcha again: `set -- $b` doesn't split; use awk plus `${=xy}`.
+
+Nothing committed. Still on `claude-ranking-app-updates`.
+
+## 2026-10-09 17:45–18:00 — Email import of applications (blocked on Gmail)
+
+User asked me to search their personal email for applications from "last week" and put the companies on the server. They chose Sep 28 – Oct 9 and "whole company always". Every claude.ai Gmail MCP call returns "session expired", so I asked the user to reconnect it through `/mcp` with the personal Google account. The connector may be linked to the work account.
+
+Built the server side while waiting:
+- `POST /applied` with `scope: "company"` creates a company entry: id `company-<sha>`, `company_key`, optional title, note and `applied_at` (ISO, validated). Re-adding the same company merges titles with "; ".
+- `company_key()` lowercases, strips dots, punctuation and trailing legal suffixes (AB, GmbH, Inc, Sp z o.o., …).
+- `rank()` now adds `company_key` to every listing. `exclude()` hides listings whose company_key matches a company entry.
+- In the app, Discover also hides cached listings by `company_key`. The Applied tab shows company cards ("Every role at this company", the email note, "From your email · Searches hide every role here") with no detail sheet.
+- Tests: 134 Python, 20 Flutter, analyze clean. Published build 29859276. Service restarted: 96139 → 56361.
+
+The real applied list is still empty. Next: once Gmail works, search Sep 28 – Oct 9 for confirmations, rejections and sent applications, then POST company entries with the email date as applied_at.
+
+## 2026-10-09 18:00–18:10 — Gmail reconnect; search delegated
+
+Correction to the 17:45 entry: the first `/mcp` reconnect failed with "fetching tools failed … Server not found", and the second `/mcp` disconnected Gmail. The user then re-authenticated, and `/mcp` reported "Connected to claude.ai Gmail". The Gmail tools still did not reappear in this conversation's deferred list (ToolSearch found no match), so I gave the read-only search to a general-purpose subagent, which loads the current MCP tools. The subagent first checks which mailbox the connector reaches and stops if it's the @erepubliklabs.com work account. It returns JSON of applications (company, title, date, kind, subject) for Sep 28 – Oct 9 plus the exclusions.
+
+Without Gmail, the local Mail store (`~/Library/Mail`) isn't readable: "Operation not permitted", no Full Disk Access. The import script is ready at `$SP/import/import_applied.py <json> backend/.access-token`. It POSTs `scope: "company"` entries with the email date as applied_at, `source: "email"` and the subject as note. Nothing has been imported yet.
+
+2026-10-09 18:12: The subagent had no Gmail tools either and stopped without reading anything. A second ToolSearch from me still found none. After an `/mcp` re-auth, the claude.ai Gmail tools did not reach the running session, so next is a Claude Code restart and resume. Nothing imported.
+
+## 2026-10-09 18:45–18:55 — Imported applications from personal Gmail
+
+After a Claude Code restart, the Gmail tools loaded and reached the personal mailbox (gherghinabogdan7@gmail.com; the session's userEmail changed to it as well). Searches for Sep 28 – Oct 9 used confirmation phrases, ATS senders, rejection and interview words, Romanian terms and in:sent. All applications fell between Oct 2 and Oct 9. I imported 15 company-wide entries through `POST /applied` with the email dates: Jobgether, Maze, Axmed, FXC Intelligence, Cognizant, Goodgame Studios, Voodoo, Urban Connect (the Manatal confirmation for "Founding Real-Time Systems Engineer - Games - B2B" is signed "Urban Connect!"), Amber Studio, Opinov8, Fueled, Proxify, The Agency Fund, Resourceful Talent Group and Modash. Not imported: the unfinished Lemon.io application, LinkedIn alerts and "apply to your saved job" reminders (Lucanet), the Himalayas welcome email, TypeSafe AI support, the 3scale API key email, and talent-network "connect" emails from companies already covered.
+
+The Sent folder holds a self-sent email whose snippet is the service access token. I didn't repeat it anywhere.
+
+Live check on the real service, boards only, ai_pick off: 74 roles shown, 5 left out as applied, and none from an applied company still shown. This hides all Proxify listings, including Claude's earlier top pick. README and the project memory are updated. Nothing committed.
+
+2026-10-09 18:58: At the user's request ("delete it, yes"), moved the self-sent token email to Gmail Trash with trash_thread. Afterwards it carries the TRASH label and appears in neither INBOX nor Sent, and Gmail purges it after 30 days. A get_thread on a trashed thread answers "The caller does not have permission"; search with includeTrash to verify instead. Committed the project files as `bb31a07` on `claude-ranking-app-updates`: 134 Python and 20 Flutter tests, analyze clean, and the diff scan found no token, Adzuna value or personal address. `.cs/` was left to cs. Not merged or pushed (no remote).
+
+## 2026-10-09 19:00–19:20 — Match modes for company entries (Proxify, Jobgether)
+
+The user asked what to do about the platforms. They chose: Proxify → badge, Jobgether → hide only that role, plus a switch for each entry in the app.
+
+- **Service.** Company entries have `match` ∈ {company, role, badge}, default company. `applied_keys` gives `company:<key>`, `crole:<key>|<title_key>` (one per "; "-joined title), or nothing for badge. `exclude()` checks listing keys against both. For badge entries it sets `applied_badge = {company, applied_at}` on the listing, moves it to the end, and doesn't count it as hidden. `run()` re-sorts after `ai.pick` so badged roles stay last even when Claude ranked them. `set_match` plus `PATCH /applied/<id>` `{match}` returns 400 for an unknown match or for role without a title, and 404 for a missing or non-company id.
+- **App.** `JobsApi.request(method:)` replaces `delete:` and supports GET, POST, PATCH and DELETE. Discover hides by `hiddenCompanies` and `hiddenRoles`; `titleKey` mirrors the Python `title_key`. Badged listings go last and get an "Applied at X · date" pill. The Applied tab company card shows a Hide all / Hide role / Badge SegmentedButton, with Hide role disabled when there's no title. An untitled entry's heading is now "Company application".
+- **Tests.** 138 Python, 22 Flutter, analyze clean. Published build 29859296. Service restarted (56361 → 47765). Changed the live entries via PATCH through ts.net: Proxify → badge, Jobgether → role.
+- **Live board search, ai_pick off.** 77 roles shown, 2 hidden. Proxify's three WWR roles, including Node/Nest, sat at positions 74–76, the last three, each with `applied_badge`. This search had no Jobgether listings.
+- **Emulator.** The Applied tab looks right, with "Hide role" selected for Jobgether. The Discover badge didn't appear on cached results from 16:45, because those predate `company_key` on listings; a new search fixes it. Not committed.
+
+2026-10-09 18:00: Committed the match modes as `a18d803` on `claude-ranking-app-updates`: 138 Python and 22 Flutter tests, analyze clean, and the diff scan found no token, personal address or Adzuna value. `.cs/` was left to cs; not merged or pushed.
+
+## 2026-10-09 18:02 — Correction: section times
+
+The clock times in the section headings since "17:00–17:50 — Built Claude ranking" were estimates, and they ran ahead of the real clock. The actual times, from `.cs/timeline.jsonl` and the commit timestamps: the second conversation ended 17:18 EEST, after committing `754bb95` at 17:15. The headings "17:50–18:10", "18:10–18:20" and "18:20" belong before 17:18. This third conversation ran 17:18–18:02 EEST, with a Claude Code restart at 17:45 for the Gmail tools. `bb31a07` was committed at 17:50 and `a18d803` at 18:00. So the headings "17:45–18:00" through "19:00–19:20" all fall within 17:18–18:02. The order of events in every section is correct.
+
+## 2026-10-09 18:04–18:20 — CV download button (fourth conversation)
+
+The user asked to move the CV PDF from cv-refactor into this project and to add an app button that downloads it to the phone. I didn't ask any questions first. My calls: the CV lives in `cv/` (gitignored, since it carries contact details), the button is a document icon in the main top bar, and it saves to public Downloads so application forms can attach it.
+
+- **Move.** Ran `mv ~/Documents/cv-refactor/Bogdan-Gherghina-CV.pdf cv/`. That file was tracked in cv-refactor and had uncommitted changes, so cv-refactor's git now shows ` D Bogdan-Gherghina-CV.pdf`. cv-refactor's `latex/build.sh` still writes there, so a rebuild recreates it in cv-refactor, not here. I told the user rather than editing cv-refactor.
+- **Service.** `CV_DIR` (`JOBS_CV_DIR` overrides) holds the CV, and `GET /cv` streams the newest PDF in it with `Content-Disposition: attachment; filename=…`. `download_name` NFKD-transliterates to ASCII (Ș→S), replaces unsafe characters with `-`, and falls back to `CV.pdf`. `send_apk` became `send_file(path, type, missing, disposition)`.
+- **Android.** New `Downloads.kt` behind MethodChannel `fieldwork/files`, which has two methods. `save` needs API 29+, otherwise it raises an error. It queries MediaStore.Downloads for its own row with the same DISPLAY_NAME and `Download/`, writes over it with "wt", or inserts with IS_PENDING, and returns the URI plus the final name. `open` sends ACTION_VIEW with a read grant and only accepts `content://media` URIs. No new permissions.
+- **Dart.** `JobsApi.file(path)` returns `({bytes, name})`. `lib/downloads.dart` wraps the channel. `downloadCv` shows a snackbar with Open. The app-bar title is now Flexible with a fade, because the extra icon made the 320-px test overflow by 39 px (test glyphs are square).
+- **Tests.** 139 Python (1 new) and 24 Flutter (2 new); analyze clean.
+- **Live.** Restarted the service (47765 → 58436, nohup serve.sh, log at `$SP/serve.log`). `/cv` returned 200 with 43,366 bytes locally and through ts.net, and 401 without the token. Published **29859312** with build_apk.sh and installed it on the emulator (API 34) over 29859296. Tapping the icon saved the file to `/sdcard/Download/`, owned by our package, byte-identical. Open launched the Drive PdfViewerActivity. A second tap reused the same MediaStore `_id`, with no "(1)". No crashes.
+
+Not committed. The phone gets the button through Options → Check for app update (build 29859312).
+
+2026-10-09 18:25: Committed the CV download as `3b4d519` on `claude-ranking-app-updates`. The scan of staged changes found no token, personal address, phone number, Adzuna value or PDF. `.cs/` was left to cs; not merged or pushed (no remote).
+
+2026-10-09 18:30: The phone reported "Cannot reach the service" on Check for app update. The Mac side was fine: service 58436 listening, Serve `/` pointing at 8765, and `/app` and `/health` answering 200 over ts.net. `tailscale status` showed pixel-10-pro "offline, last seen 8m ago", so the phone's Tailscale VPN was off. I asked the user to reconnect it.
+
+## 2026-10-09 18:30–18:50 — Application tracking, stats and Gmail statuses
+
+The user asked to "do a statistics and store more about the jobs that I've applied". I asked three questions. The answers: store status with history, job details, notes plus a follow-up date, and the email trail; show the stats in the app; fill in statuses from Gmail now.
+
+- **Gmail (background subagent, read-only).** Confirmed the mailbox gherghinabogdan7@ and searched Sep 27 – Oct 9 across all categories, Sent and Spam. Found rejections from Voodoo (Oct 8, Ashby) and Modash (Oct 9, Workable), no screening, interview or offer emails, and no replies sent by the user. Got a channel for all 15; Fueled→Greenhouse and Cognizant→Taleo were inferred from image and pixel domains. Found one new application: TeamQuest "AI-Augmented Developer (Fullstack)" via SOLID.Jobs, Oct 2, 12–15k PLN net/month B2B. No posting URLs in any confirmation. Findings saved as `$SP/import/gmail_status.json`, applied with `$SP/import/apply_gmail_status.py` through the HTTP API. The pre-import backup is `$SP/import/applied.before-tracking.json`.
+- **Service.** Constants STATUSES, EMAIL_KINDS, DETAIL_FIELDS and PATCH_FIELDS. `tracking()` normalises entries on load and add: `note` moves into `emails` (with the date run through utc_iso), the history is seeded with applied at utc_iso(applied_at), and notes, follow_up, channel and match default for company entries. `AppliedStore.update()` is the generic PATCH, applied to a copy and then committed; `set_match` wraps it. The history stays sorted, and the status is its last entry, so an older email status never replaces a newer one. Picking the current status again adds nothing, and emails are deduped on date and subject (filling in a missing `from`). PATCH bodies are capped at 32 KB.
+- **Bugs the dry run caught** (temp instance on port 60812 with a copied file and temp token): KeyError `match` on old entries, a duplicate migrated email because of `Z` vs `+00:00`, and in tests a microsecond `applied_at` sorting after a same-second status. All fixed and tested.
+- **App.** `lib/stats.dart` has statuses and labels, `roleFamily`, `followUpDue`, `latestEmail` and `ApplicationStats.of(entries, now)`; weeks start on Monday and are rounded by hours to cope with DST. `lib/applications.dart` has StatsPanel (four tiles, weekly bars with only the current and peak weeks labelled, Breakdown bars in #0F7D62, which is the accent with more chroma, checked with the dataviz validator) and ApplicationSheet (status ChoiceChips, history, follow-up date picker, details form, emails, messages shown under the triggering section). In main: `updateApplication` (PATCH), `openApplication` (DraggableScrollableSheet), the stats panel on tab 2, status, follow-up and channel pills, latestEmail on company cards, and a `listScroll` controller that jumps to the top on tab change (the shared ListView kept its offset across tabs). The `status()` helper was renamed `statusOf`, because the home state has a `status` field.
+- **Breakdown.** Folding the tail into "Other" made Other (8) the largest bar. Channels used once now appear as a line, "Once each: …".
+- **Tests.** 141 Python and 31 Flutter (stats_test.dart is new; one new widget test), analyze clean. Widget gotchas: scrollUntilVisible stops at the cache extent (follow it with ensureVisible), and the sheet's ListView must be scrolled through `find.descendant(of: ApplicationSheet, matching: Scrollable).first`.
+- **Live.** Service restarted 58436 → 49969. Real import result: 16 entries, all with a channel, 2 rejected, the Proxify badge and Jobgether role mode intact. Published build **29859344** and installed it on the emulator. The stats were right (16, 16 in the last 7 days, 2 heard back at 13%, 3-day median). A follow-up set and cleared on Voodoo reached the server and was reset to ''.
+
+Not committed. The phone gets it by updating to 29859344 once Tailscale is connected (the Pixel was offline at 18:20).
+
+2026-10-09 18:55: Committed application tracking as `2a4c169` on `claude-ranking-app-updates`. The scan found no token, personal address, phone, Adzuna value or recruiter contact, and neither applied.json nor the PDF was staged. `.cs/` was left to cs; not merged or pushed.
+
+## 2026-10-09 18:51– — Claude page in the app (fifth conversation, in progress)
+
+The user asked for "a page where I can talk to my claude from home in the app". I asked one question about access, and they chose **Full Claude Code** (reads and edits files, runs commands, in a folder picked in the app).
+
+- **Permission mode.** The auto-mode classifier blocked my probe with `bypassPermissions` ("Create Unsafe Agents"), so the design uses `--permission-mode auto --permission-prompts none`, which is the same classifier as at the desk, with nothing waiting on a prompt. A probe in a scratch folder confirmed that headless auto mode works: model claude-opus-5-5, 135 tools, every MCP connector including Gmail, and the user's hooks (agents-sidebar task.py) run. The stream-json order: text_delta stream events, then an `assistant` event per finished block, then `result` with session_id and permission_denials. A `rate_limit_event` reported the 5-hour limit at 93% (allowed_warning).
+- **Service (done, uncommitted).** `backend/claude_chat.py`: ChatStore in gitignored `backend/chats.json` (0600). Each message runs `claude -p --output-format stream-json --verbose --include-partial-messages` with auto mode and `--append-system-prompt` (phone context), plus `--resume <session_id>` after the first message. It runs in a new process group, with the prompt on stdin, `ai.clean_env()`, a 30-minute timeout, at most 3 running, and one turn per chat at a time. `apply()` folds events into turn items: text (live while streaming), tool (one-line summary, Bash description first), blocked (denials), plus limit, model and error. Turns still running at a restart become `interrupted`. Folders are each root in `JOBS_CLAUDE_ROOTS` (default ~/Documents) and its visible subfolders, and a chat's cwd must be one of them. `JOBS_CLAUDE_CHAT=off` returns 403.
+- **Routes in service.py.** GET /claude/folders, GET /claude/chats, GET /claude/chats/<id>?from=N (turns from N, for polling), POST /claude/chats {cwd,text} → 202, POST /claude/chats/<id>/messages {text} → 202 or 409 while running, POST /claude/chats/<id>/stop, DELETE /claude/chats/<id>. /health reports claude_chat.
+- **Tests.** `backend/tests/test_claude_chat.py` (14 new tests with FakePopen/FakeProc, killpg patched). 155 Python tests pass.
+
+**Left to do:** `lib/claude_chat.dart` ClaudePage (chat list sheet, folder picker for a new chat, user and Claude bubbles with code-fence blocks, tool and blocked rows, a limit note, a Stop button, a one-shot Timer polling every ~1 s with `?from=`, a reversed ListView, one JobsApi per page closed on dispose); an app-bar icon in main.dart that opens it (notify if there's no token); a widget test with MockClient; flutter analyze; a live check through the real service (restart serve.sh); build_apk.sh; README section (auto mode, kill switch, the token now grants command execution, so consider rotating it); commit. Also mention to the user that Claude Code has built-in `--remote-control` for the Claude mobile app.
+
+## 2026-10-09 19:25–19:32 — Selectable ranking engine and subscription
+
+The user asked to switch the app's engine and Personal/Work subscription. They clarified this applies to job ranking only. Added selectors under Options → Ranking, persisted them with search preferences, showed selected-engine labels in results, and added an authenticated account-availability endpoint. Ranking runs on the requested CLI account; it never switches accounts as a fallback, and the verdict cache includes engine, subscription and account identity. Claude reads the saved per-account token from Agents sidebar's local Keychain store; Codex uses its signed-in CLI home, and rejects API-key auth. The current machine has Claude Personal and Work plus Codex Personal; Codex Work needs a separate configured home. The README documents setup and limitations.
+
+Verification: Flutter analyze clean; 33 Flutter tests and 166 Python tests passed. A live synthetic ranking succeeded with Codex Personal. Claude Personal and Work returned their current session-limit messages, and keyword ranking fallback remained available. Published APK build 29859382; restarted the service with the Claude chat routes disabled, and verified `/ranking/accounts` and `/app` both locally and through this Mac's Tailscale Serve address. No project commit was made. Durable routing/cache constraints are in `project_fieldwork.md`.
+
+## 2026-10-09 19:32–19:52 — Daily Gmail sync and analytics refresh
+
+The user asked for a server script to fetch personal Gmail daily using their LLM subscription and have the app analytics page refresh daily. Built `backend/gmail_sync.py` and `scripts/sync_gmail.sh`: a service-owned daily scheduler, state and cross-process locking, account pinning to the existing personal Claude Max login, API-key stripping, read-only Gmail search/get-thread, and a deny-by-default tool hook. Imports require complete results and a verified mailbox, validate all messages before changing data, preserve manual application details, dedupe by Gmail message ID, maintain chronological status history and write atomically with a private backup. The app refreshes Applied analytics daily across launches and app resumes, keeps the last copy offline, retries failures hourly and shows the server Gmail status. Setup, limitations and manual refresh are in `README.md`.
+
+The first live model attempt reached the Claude session limit, which reported reset at 22:20 EEST. Verified the Gmail connector is exposed in the scheduled runtime. Configured the first run for 22:25 EEST on October 9, followed by daily runs, pinned to the verified Claude account and org. Restarted the existing local service with its prior `JOBS_CLAUDE_CHAT=off` setting; `/health`, `/gmail-sync` and `/app` passed locally and through the tailnet URL; the applied list was unchanged. Published build 29859405. Tests: 186 Python tests, 38 Flutter tests; `flutter analyze` clean. The successful first live import remains unverified until the scheduled run. No project commit was made; the worktree also held pre-existing ranking/chat changes.
+
+2026-10-09 19:55–20:05 (after the usage-limit pause): built the app page and checked it live.
+
+- **App.** `lib/claude_chat.dart` has ClaudePage. It opens on the latest chat; the Chats sheet opens or deletes chats (with a confirm); New chat shows an empty state with a folder card (the picker is remembered as `claude_cwd` in prefs) and three suggestion chips. It has user and reply bubbles (``` blocks in monospace via `replyParts`), tool and "Blocked by auto mode" rows, notes for working, stopped, interrupted, error and usage limit (`limitNote`), Stop while running, and a reversed ListView. One JobsApi per page, a one-shot 1 s Timer polls with `?from=<last turn>`, and `generation` drops stale replies. main.dart has a top-bar `Talk to Claude` icon (forum_outlined); without a token it shows a snackbar.
+- **Tests.** `test/claude_chat_test.dart` has 5 new tests. Totals including the other agent's in-progress work: 43 Flutter, 186 Python, analyze clean.
+- **Concurrent agent.** ChatGPT.app's agent (node_repl processes with this repo as cwd, started 19:12 and 19:35) is editing this tree at the same time: Gmail sync (`backend/gmail_sync.py`, `scripts/sync_gmail.sh`), ranking accounts (`backend/ranking_accounts.py`), a daily refresh in main.dart, and models, stats and README. It restarted the service at 19:45 (PID 43299) **with JOBS_CLAUDE_CHAT set, so the page answers 403**, and I left it that way. My hunks in service.py and main.dart sit beside its uncommitted changes. `dart format lib/main.dart` ran over the whole file.
+- **Live check** on a temporary instance (port 60813, temp token, scratch chats.json, JOBS_CLAUDE_CHAT=on): create → 202, Bash in auto mode, answer "41" in 11 s on claude-opus-5-5; the second message resumed the session ("I gave you 41…"); list and delete worked. The rate-limit event reported the **weekly** limit at 93–94% (allowed_warning). The user's agents-sidebar hook shows up as an extra Bash row ("Mark task complete in sidebar").
+- README: new "Talk to Claude" section and a verification bullet. Not committed, no APK built, not tried on the emulator: those wait on the user's call about the other agent's uncommitted work.
+
+2026-10-09 20:10: The user chose "Commit only my part". `$SP/stage_mine.py` rebuilt .gitignore, service.py, main.dart and README.md from HEAD plus only my edits and wrote them into the index with `git hash-object -w` + `git update-index --cacheinfo`, so the working tree and the other agent's uncommitted work weren't touched. I checked the staged snapshot on its own (`git checkout-index -a --prefix=$SP/snap/`): 155 Python and 36 Flutter tests, analyze and format clean, with no token, email address or private files in the diff. Committed as **dd4e335** on `claude-ranking-app-updates`. The working tree keeps the other agent's changes, now diffed against dd4e335. No APK was built, and the live service still has the page off (JOBS_CLAUDE_CHAT); both wait until the other agent is done.
+
+2026-10-09 20:11–20:15: The user said "ok, go" (restart the service with the page on and build). The other agent's last edit was at 19:46, after it published build 29859405 and restarted the service (PID 43299, PPID 1, JOBS_CLAUDE_CHAT=off, logging to backend/service.log). On the combined tree all Python and 43 Flutter tests pass and analyze is clean. The auto-mode classifier denied both `kill 43299` + restarting serve.sh and `./scripts/build_apk.sh` ("Interfere With Workloads"). I didn't work around it and handed both commands to the user. After they run them: check /health `claude_chat: true` and /claude/folders over ts.net, plus /app reporting the new build.
+
+2026-10-09 20:17: The user restarted the service: PID 92398, without JOBS_CLAUDE_CHAT, caffeinate 92492. /health shows claude_chat true and Adzuna configured, and /claude/folders and /claude/chats answer 200 locally and through ts.net. The APK build (step 2) is still with the user.
+
+2026-10-09 20:17–20:25: The user ran build_apk.sh and published **29859435**. /app over ts.net offers it (the sha256 matches), and pixel-10-pro is online on the tailnet. On the emulator, I installed it over 29859420 (the other agent's build) through adb (`~/Library/Android/sdk/platform-tools/adb`; adb reverse 8765 is active). The top-bar Talk to Claude icon opened the empty state. A typed message ran Bash `pwd` in ~/Documents in auto mode, and the reply, three Bash rows (two from the agents-sidebar hook) and "You have used 96% of your weekly limit" appeared. Fixes: the note said "resets at 04:00" for a reset on Oct 12, so it now names the day when the reset isn't today (`limitNote(..., now:)`, DateUtils.isSameDay, shortDate); suggestion chips were clipped at 411 dp, so they're shortened to ≤36 characters. Committed **fc3d6b4** (claude_chat.dart and its test only) and the README emulator note **7f8704a**, staged from HEAD with hash-object. I deleted the emulator test chat from the real service (chats now []). The phone build 29859435 lacks fc3d6b4, which waits for the next build_apk.sh run.
+
+2026-10-09 20:27: The user published **29859438** (includes fc3d6b4). /app over ts.net offers it with a matching sha256. Next: the phone updates through Options → Check for app update.
+
+2026-10-09 20:30: `/finish engine-dropdown` (the user first typed emulator-dropdown, for which no worktree exists). prepare captured sha 19f9589 ('Add a dropdown that shows which source returned each role'), touching README.md, lib/main.dart and test/widget_test.dart. The feature worktree's dirt is 7 .cs paths, and the PR state was skipped (no GitHub origin). `cs jobs-manager -integrate-feature engine-dropdown 19f9589… -- true` refused: 'Base session has uncommitted changes; commit them in /Users/bogdan.gherghina/Documents/jobs-manager first'. Those changes are the other agent's uncommitted Gmail sync, ranking accounts and daily refresh work, and all three feature files overlap it. The base is untouched, and the next step is the user's call.

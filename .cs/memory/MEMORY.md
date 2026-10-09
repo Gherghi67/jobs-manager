@@ -1,4 +1,6 @@
 # Durable memory
 
-- [project_fieldwork.md](project_fieldwork.md) records the confirmed source scope, local service requirement, exact Adzuna secret-store routing, and eligibility distinctions that future changes must preserve.
+- [project_fieldwork.md](project_fieldwork.md): Fieldwork constraints: source scope, Adzuna secret-store routing, eligibility rules, Claude/Codex ranking by Personal or Work subscription (never API-key billing; account-scoped cache), update installer, applied-job tracking and daily read-only Gmail sync with guarded Claude account, atomic/deduped imports and app analytics refresh, Proxify badge, Jobgether role-only; dry-run bulk edits on a copy; CV in gitignored cv/.
 - [Session narrative — bogdan-gherghina-erepubliklabs-com (lab notebook)](narrative.bogdan-gherghina-erepubliklabs-com.md): looser-bar work-in-progress; its owner reads it in full on resume, anyone else only the lines the resume digest names; older sections under .cs/narrative-archive/
+- [reference_tailscale_service.md](reference_tailscale_service.md): Tailscale Serve URL of the Fieldwork service (macbook-pro-2…ts.net, tailnet only) and device names; "Cannot reach the service" on the phone usually means the Pixel's Tailscale is off; Taildrop is unreliable.
+- [reference_gmail_connector.md](reference_gmail_connector.md): Application emails are in actor bogdan-gherghina-erepubliklabs-com's personal Gmail; after /mcp re-auth, restart Claude Code before the Gmail tools appear.
