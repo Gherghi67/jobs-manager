@@ -1,0 +1,153 @@
+{
+  "report_prefix": "broad",
+  "seen_file": "seen.broad.json",
+  "countries": ["de", "nl", "pl", "at", "gb", "es", "fr"],
+  "currencies": {"de": "EUR", "nl": "EUR", "at": "EUR", "es": "EUR", "fr": "EUR", "pl": "PLN", "gb": "GBP"},
+  "request_delay_seconds": 2.5,
+  "queries": [
+    {
+      "name": "ai-remote",
+      "params": {
+        "what_or": "llm llms genai rag agentic langchain langgraph llamaindex",
+        "what_and": "remote",
+        "max_days_old": 21,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 2
+    },
+    {
+      "name": "ai-engineer",
+      "params": {
+        "what_phrase": "ai engineer",
+        "max_days_old": 21,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 1
+    },
+    {
+      "name": "backend-remote",
+      "params": {
+        "what_or": "python golang django fastapi backend",
+        "what_and": "remote",
+        "max_days_old": 14,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 2
+    },
+    {
+      "name": "contract",
+      "params": {
+        "what_or": "typescript nodejs node python golang llm backend",
+        "contract": 1,
+        "max_days_old": 21,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 1
+    }
+  ],
+  "scoring": {
+    "core_weight": 3,
+    "secondary_weight": 1,
+    "title_multiplier": 2,
+    "penalty_points": 3,
+    "core_terms": [
+      ["node.js", "nodejs", "node js", "node"],
+      "typescript",
+      "nestjs",
+      "python",
+      ["golang", "go developer", "go engineer"],
+      ["llm", "llms", "large language model", "large language models"],
+      ["ai engineer", "ai engineering", "applied ai", "genai", "gen ai", "generative ai"],
+      ["agentic", "ai agent", "ai agents", "llm agents", "multi-agent"],
+      ["rag", "retrieval augmented generation"],
+      ["nlp", "natural language processing"]
+    ],
+    "secondary_terms": [
+      ["langchain", "langgraph", "llamaindex", "llama index"],
+      ["openai", "anthropic", "claude"],
+      ["vector database", "vector db", "pgvector", "pinecone", "weaviate", "qdrant"],
+      ["machine learning", "ml"],
+      ["pytorch", "tensorflow", "keras"],
+      ["fastapi", "django", "flask"],
+      "express",
+      "mysql",
+      ["postgres", "postgresql"],
+      "redis",
+      ["websocket", "websockets"],
+      "bullmq",
+      ["microservice", "microservices"],
+      ["backend", "back-end", "back end", "backends"],
+      ["real-time", "realtime"],
+      ["game", "gaming"],
+      ["b2b", "contractor", "freelance", "freelancer", "contract"]
+    ],
+    "exclude_title_terms": [
+      "junior",
+      "intern",
+      "internship",
+      ["werkstudent", "werkstudentin", "werkstudentenstelle"],
+      "praktikum",
+      "trainee",
+      ["praktikant", "praktikantin"],
+      ["staż", "stażysta", "stażystka"],
+      ["stagiair", "stagiaire"],
+      ["alternance", "alternant", "alternante"],
+      ["prácticas", "becario", "becaria"],
+      "apprentice",
+      "apprenticeship",
+      "graduate",
+      "ausbildung"
+    ],
+    "penalty_title_terms": [
+      ["frontend", "front-end", "front end"],
+      "php",
+      "java",
+      [".net", "dotnet"],
+      "c#",
+      "ruby",
+      "salesforce",
+      "sap",
+      ["android", "ios"],
+      "embedded",
+      ["sales", "account executive", "account manager", "recruiter"],
+      ["ai trainer", "ai tutor", "annotator", "annotation", "rater"]
+    ]
+  },
+  "remote": {
+    "remote_terms": [
+      "remote",
+      "fully remote",
+      "100% remote",
+      "remote-first",
+      "work from home",
+      "home office",
+      "homeoffice",
+      "telearbeit",
+      "mobiles arbeiten",
+      "zdalna",
+      "zdalnie",
+      "praca zdalna",
+      "thuiswerken",
+      "op afstand",
+      "télétravail",
+      "teletrabajo",
+      "en remoto",
+      "remoto"
+    ],
+    "hybrid_terms": [
+      "hybrid",
+      "hybride",
+      "hybrydowa",
+      "híbrido",
+      "vor ort",
+      "on-site",
+      "onsite",
+      "sur site",
+      "presencial"
+    ]
+  }
+}

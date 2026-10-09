@@ -1,0 +1,102 @@
+{
+  "countries": ["de", "nl", "pl", "at"],
+  "currencies": {"de": "EUR", "nl": "EUR", "at": "EUR", "pl": "PLN"},
+  "request_delay_seconds": 2.5,
+  "queries": [
+    {
+      "name": "tech",
+      "params": {
+        "what_or": "typescript nodejs nestjs node",
+        "max_days_old": 14,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 2
+    },
+    {
+      "name": "tech-remote",
+      "params": {
+        "what_or": "typescript nodejs nestjs node",
+        "what_and": "remote",
+        "max_days_old": 14,
+        "sort_by": "date",
+        "results_per_page": 50
+      },
+      "pages": 1
+    }
+  ],
+  "scoring": {
+    "core_weight": 3,
+    "secondary_weight": 1,
+    "title_multiplier": 2,
+    "penalty_points": 3,
+    "core_terms": [
+      ["node.js", "nodejs", "node js", "node"],
+      "typescript",
+      "nestjs"
+    ],
+    "secondary_terms": [
+      "express",
+      "mysql",
+      ["postgres", "postgresql"],
+      "redis",
+      ["websocket", "websockets"],
+      "bullmq",
+      "sequelize",
+      "typeorm",
+      ["microservice", "microservices"],
+      ["backend", "back-end", "back end", "backends"],
+      ["real-time", "realtime"],
+      ["game", "gaming"]
+    ],
+    "exclude_title_terms": [
+      "junior",
+      "intern",
+      "internship",
+      ["werkstudent", "werkstudentin"],
+      "praktikum",
+      "trainee",
+      ["praktikant", "praktikantin"],
+      ["staż", "stażysta", "stażystka"],
+      ["stagiair", "stagiaire"],
+      "apprentice",
+      "ausbildung"
+    ],
+    "penalty_title_terms": [
+      ["frontend", "front-end", "front end"],
+      "php",
+      "java",
+      [".net", "dotnet"],
+      "c#",
+      "ruby",
+      "salesforce",
+      "sap"
+    ]
+  },
+  "remote": {
+    "remote_terms": [
+      "remote",
+      "fully remote",
+      "100% remote",
+      "remote-first",
+      "work from home",
+      "home office",
+      "homeoffice",
+      "telearbeit",
+      "mobiles arbeiten",
+      "zdalna",
+      "zdalnie",
+      "praca zdalna",
+      "thuiswerken",
+      "op afstand"
+    ],
+    "hybrid_terms": [
+      "hybrid",
+      "hybride",
+      "hybrydowa",
+      "vor ort",
+      "on-site",
+      "onsite"
+    ]
+  }
+}

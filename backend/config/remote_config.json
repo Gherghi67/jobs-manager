@@ -1,0 +1,137 @@
+{
+  "max_age_days": 30,
+  "min_score": 3,
+  "request_delay_seconds": 1.0,
+  "report_limits": {"open": 80, "us": 40, "unclear": 30},
+  "sources": {
+    "remotive": {"categories": ["software-dev"]},
+    "remoteok": {"tags": ["node", "typescript", "backend", "javascript"]},
+    "himalayas": {
+      "queries": ["nodejs", "node.js", "typescript", "nestjs", "backend engineer"],
+      "contractor_pages": 3,
+      "any_type_pages": 2
+    },
+    "jobicy": {"tags": ["nodejs", "node", "typescript", "backend"], "count": 100},
+    "workingnomads": {},
+    "weworkremotely": {
+      "feeds": [
+        "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
+        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+        "https://weworkremotely.com/remote-jobs.rss"
+      ]
+    },
+    "arbeitnow": {"pages": 4},
+    "hackernews": {}
+  },
+  "scoring": {
+    "core_weight": 3,
+    "secondary_weight": 1,
+    "title_multiplier": 2,
+    "penalty_points": 3,
+    "core_terms": [
+      ["node.js", "nodejs", "node js", "node"],
+      "typescript",
+      "nestjs"
+    ],
+    "secondary_terms": [
+      "express",
+      "mysql",
+      ["postgres", "postgresql"],
+      "redis",
+      ["websocket", "websockets", "socket.io"],
+      ["bullmq", "bull"],
+      "sequelize",
+      ["typeorm", "prisma"],
+      ["microservice", "microservices"],
+      ["backend", "back-end", "back end", "backends", "server-side"],
+      ["real-time", "realtime"],
+      ["game", "gaming", "games", "multiplayer"],
+      ["api", "apis", "rest", "graphql"],
+      ["jest", "testing"],
+      ["protobuf", "protocol buffers", "grpc"]
+    ],
+    "exclude_title_terms": [
+      "junior",
+      "intern",
+      "internship",
+      "trainee",
+      "apprentice",
+      ["werkstudent", "werkstudentin"],
+      ["trainer", "ai trainer", "code trainer"],
+      ["annotator", "annotation", "rater", "evaluator"],
+      ["designer", "recruiter", "sales", "account executive", "marketing"],
+      ["test job", "latam only"]
+    ],
+    "penalty_title_terms": [
+      ["frontend", "front-end", "front end"],
+      "php",
+      "java",
+      [".net", "dotnet"],
+      "c#",
+      "ruby",
+      ["rails", "ruby on rails"],
+      "python",
+      "golang",
+      "go",
+      "rust",
+      "salesforce",
+      "sap",
+      ["react native", "ios", "android", "flutter", "mobile"],
+      ["vue", "vue.js", "angular"],
+      ["devops", "sre", "site reliability"],
+      ["data engineer", "data scientist", "ml engineer", "machine learning"],
+      ["qa", "test engineer", "sdet"],
+      ["manager", "director", "head of", "vp"],
+      ["wordpress", "shopify", "magento"]
+    ]
+  },
+  "location": {
+    "worldwide_terms": [
+      "anywhere",
+      "anywhere in the world",
+      "worldwide",
+      "world wide",
+      "global",
+      "globally",
+      "all countries",
+      "any location",
+      "work from anywhere",
+      "fully distributed",
+      "remote (anywhere)"
+    ],
+    "europe_terms": [
+      "europe",
+      "european",
+      "eu",
+      "emea",
+      "cet",
+      "cest",
+      "eet",
+      "romania",
+      "bucharest",
+      "eastern europe",
+      "central europe",
+      "cee",
+      ["gmt+2", "utc+2", "gmt +2", "utc +2"],
+      ["gmt+3", "utc+3"],
+      "european time zones",
+      "european timezone"
+    ],
+    "us_terms": [
+      "us",
+      "usa",
+      "u.s.",
+      "u.s",
+      "united states",
+      "north america",
+      "americas",
+      "canada",
+      "us only",
+      "us-based",
+      "est",
+      "pst",
+      "us time zones",
+      "us timezone"
+    ]
+  }
+}

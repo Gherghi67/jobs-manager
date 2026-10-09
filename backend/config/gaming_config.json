@@ -1,0 +1,201 @@
+{
+  "report_title": "Remote gaming-industry search",
+  "report_prefix": "gaming",
+  "seen_file": "seen.gaming.json",
+  "max_age_days": 45,
+  "min_score": 3,
+  "require_core": false,
+  "request_delay_seconds": 0.4,
+  "report_limits": {"open": 100, "us": 50, "unclear": 40},
+  "sources": {
+    "remoteok": {"tags": ["game", "gaming"]},
+    "himalayas": {
+      "queries": ["game", "games", "gaming", "game backend", "game server", "multiplayer"],
+      "contractor_pages": 2,
+      "any_type_pages": 2
+    },
+    "jobicy": {"tags": ["gaming", "game"], "count": 100},
+    "workingnomads": {},
+    "weworkremotely": {
+      "feeds": [
+        "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
+        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+        "https://weworkremotely.com/remote-jobs.rss"
+      ]
+    },
+    "hackernews": {},
+    "greenhouse": {
+      "industry": "gaming",
+      "boards": {
+        "riotgames": "Riot Games",
+        "epicgames": "Epic Games",
+        "roblox": "Roblox",
+        "scopely": "Scopely",
+        "bungie": "Bungie",
+        "remedy": "Remedy Entertainment",
+        "tripledotstudios": "Tripledot Studios",
+        "2k": "2K",
+        "rockstargames": "Rockstar Games",
+        "playtikaltd": "Playtika",
+        "dreamgames": "Dream Games",
+        "mobilityware": "MobilityWare",
+        "wooga": "Wooga",
+        "tactilegames": "Tactile Games"
+      }
+    },
+    "lever": {
+      "industry": "gaming",
+      "boards": {
+        "kabam": "Kabam",
+        "immutable": "Immutable",
+        "jamcity": "Jam City",
+        "theorycraftgames": "Theorycraft Games",
+        "xsolla": "Xsolla",
+        "larian": "Larian Studios",
+        "peakgames": "Peak Games",
+        "dreamgames": "Dream Games",
+        "kolibrigames": "Kolibri Games",
+        "poki": "Poki"
+      }
+    },
+    "ashby": {
+      "industry": "gaming",
+      "boards": {
+        "supercell": "Supercell",
+        "improbable": "Improbable",
+        "seconddinner": "Second Dinner",
+        "voodoo": "Voodoo",
+        "moonactive": "Moon Active",
+        "thatgamecompany": "thatgamecompany",
+        "i3d": "i3D.net",
+        "poki": "Poki"
+      }
+    },
+    "smartrecruiters": {
+      "industry": "gaming",
+      "boards": {
+        "Ubisoft2": "Ubisoft",
+        "Gameloft": "Gameloft",
+        "KeywordsStudios": "Keywords Studios",
+        "cdprojektred": "CD PROJEKT RED",
+        "peoplecanfly": "People Can Fly"
+      }
+    },
+    "workable": {
+      "industry": "gaming",
+      "boards": {"rebellion": "Rebellion"}
+    },
+    "teamtailor": {
+      "industry": "gaming",
+      "boards": {
+        "embarkstudios": "Embark Studios",
+        "starbreeze": "Starbreeze",
+        "goodgamestudios": "Goodgame Studios",
+        "sharkmob": "Sharkmob",
+        "fatshark": "Fatshark",
+        "ioi": "IO Interactive"
+      }
+    }
+  },
+  "industry": {
+    "name": "gaming",
+    "match_terms": [
+      ["game", "games", "gaming", "gamer", "videogame", "videogames"],
+      ["esports", "e-sports"],
+      "multiplayer"
+    ],
+    "text_terms": [
+      ["video game", "video games", "mobile game", "mobile games", "pc games", "console games"],
+      ["game studio", "games studio", "game development", "game developer", "game developers"],
+      ["gaming industry", "games industry", "game industry"],
+      ["free-to-play", "f2p", "live service game", "live-service game", "live ops", "liveops"],
+      ["game server", "game servers", "game backend", "game backends", "multiplayer"],
+      ["unreal engine", "millions of players", "million players"]
+    ],
+    "min_text_groups": 2,
+    "count_pattern": "\\bgam(?:e|es|ing)\\b",
+    "min_count": 3,
+    "exclude_text_terms": [
+      ["casino", "casinos", "sportsbook", "sports betting", "betting", "gambling", "igaming", "i-gaming"],
+      ["slot machine", "slot machines", "slot games", "lottery", "poker"]
+    ]
+  },
+  "scoring": {
+    "core_weight": 3,
+    "secondary_weight": 1,
+    "title_multiplier": 2,
+    "penalty_points": 3,
+    "core_terms": [
+      ["node.js", "nodejs", "node js", "node"],
+      "typescript",
+      "nestjs",
+      ["backend", "back-end", "back end", "server", "server-side", "game server", "online services", "live services"]
+    ],
+    "secondary_terms": [
+      "javascript",
+      ["multiplayer", "matchmaking", "leaderboard", "leaderboards", "lobby", "netcode"],
+      ["real-time", "realtime"],
+      ["websocket", "websockets", "socket.io"],
+      "redis",
+      "mysql",
+      ["postgres", "postgresql"],
+      "mongodb",
+      ["microservice", "microservices", "distributed systems"],
+      ["api", "apis", "rest", "graphql", "grpc", "protobuf", "protocol buffers"],
+      ["live ops", "liveops", "live operations", "live service"],
+      ["aws", "azure", "gcp", "kubernetes", "docker"],
+      ["c#", "go", "golang", "java", "kotlin", "rust"]
+    ],
+    "exclude_title_terms": [
+      "junior",
+      ["intern", "internship", "trainee", "apprentice", "werkstudent", "graduate"],
+      ["artist", "animator", "illustrator", "vfx", "concept art", "art director"],
+      ["designer", "game designer", "level designer", "ux researcher", "user researcher"],
+      ["recruiter", "talent acquisition", "sourcer"],
+      ["producer", "product manager", "project manager", "program manager", "product owner"],
+      ["marketing", "community manager", "sales", "account executive", "business development", "partnerships", "brand"],
+      ["writer", "narrative", "localization", "localisation", "translator", "editor"],
+      ["qa tester", "playtester", "test analyst", "game tester"],
+      ["people partner", "hr", "finance", "accountant", "legal", "counsel", "payroll"],
+      ["customer support", "player support", "community"],
+      "test job"
+    ],
+    "penalty_title_terms": [
+      ["frontend", "front-end", "front end", "ui engineer", "ui developer", "web designer"],
+      ["unity developer", "unity engineer", "unreal", "gameplay", "graphics", "rendering", "engine programmer", "tools programmer", "animation programmer", "ai programmer", "audio"],
+      ["ios", "android", "mobile", "react native", "flutter"],
+      ["data scientist", "data analyst", "machine learning", "ml engineer", "analytics"],
+      ["devops", "sre", "site reliability", "it support", "helpdesk", "network engineer", "data center"],
+      ["security analyst", "security engineer"],
+      ["manager", "director", "head of", "vp"],
+      ["wordpress", "shopify", "php", "salesforce"]
+    ]
+  },
+  "location": {
+    "worldwide_terms": [
+      "anywhere", "anywhere in the world", "worldwide", "world wide", "global", "globally",
+      "all countries", "any location", "work from anywhere", "fully distributed", "remote (anywhere)", "international"
+    ],
+    "europe_terms": [
+      "europe", "european", "eu", "emea", "cet", "cest", "eet", "romania", "bucharest",
+      "eastern europe", "central europe", "cee",
+      ["gmt+2", "utc+2", "gmt +2", "utc +2"], ["gmt+3", "utc+3"],
+      "european time zones", "european timezone"
+    ],
+    "us_terms": [
+      "us", "usa", "u.s.", "u.s", "united states", "north america", "americas", "canada",
+      "us only", "us-based", "est", "pst", "us time zones", "us timezone"
+    ],
+    "europe_country_terms": [
+      "germany", "france", "spain", "portugal", "italy", "netherlands", "belgium", "luxembourg",
+      "poland", "czechia", "czech republic", "slovakia", "hungary", "bulgaria", "serbia", "croatia",
+      "slovenia", "greece", "cyprus", "malta", "austria", "switzerland", "ireland",
+      ["united kingdom", "uk", "england", "scotland", "wales"],
+      "sweden", "norway", "denmark", "finland", "estonia", "latvia", "lithuania", "ukraine", "moldova",
+      "paris", "berlin", "munich", "hamburg", "warsaw", "krakow", "lisbon", "lisboa", "amsterdam",
+      "rotterdam", "milan", "barcelona", "madrid", "london", "dublin", "helsinki", "stockholm", "malmo",
+      "copenhagen", "oslo", "belgrade", "prague", "budapest", "sofia", "vienna", "limassol", "tallinn",
+      "vilnius", "riga", "zagreb", "athens"
+    ]
+  }
+}

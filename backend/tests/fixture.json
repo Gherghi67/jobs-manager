@@ -1,0 +1,180 @@
+{
+  "de": {
+    "tech": [
+      {
+        "count": 7,
+        "results": [
+          {
+            "id": "4001001",
+            "title": "Senior Node.js / NestJS Backend Engineer (Remote)",
+            "description": "<strong>Fully remote</strong> role building real-time game backends with <strong>Node.js</strong>, NestJS and TypeScript. Redis, BullMQ, WebSockets and PostgreSQL in production",
+            "company": {"display_name": "Acme Games GmbH"},
+            "location": {"display_name": "Berlin, Berlin", "area": ["Germany", "Berlin", "Berlin"]},
+            "created": "2026-09-30T10:12:44Z",
+            "redirect_url": "https://www.adzuna.de/details/4001001?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 70000,
+            "salary_max": 90000,
+            "salary_is_predicted": "0",
+            "contract_type": "permanent",
+            "contract_time": "full_time",
+            "category": {"label": "IT Jobs", "tag": "it-jobs"}
+          },
+          {
+            "id": "4001003",
+            "title": "Java Backend Engineer",
+            "description": "Spring Boot services on the JVM. Experience with Node.js is a plus for our tooling team.",
+            "company": {"display_name": "Rhein Systems AG"},
+            "location": {"display_name": "Köln, Nordrhein-Westfalen", "area": ["Germany", "Nordrhein-Westfalen", "Köln"]},
+            "created": "2026-09-28T07:30:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001003?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 60000,
+            "salary_max": 75000,
+            "salary_is_predicted": "0",
+            "contract_type": "permanent",
+            "category": {"label": "IT Jobs"}
+          },
+          {
+            "id": "4001004",
+            "title": "Junior Node.js Developer",
+            "description": "Learn Node.js and TypeScript on the job with a friendly team.",
+            "company": {"display_name": "Startwerk GmbH"},
+            "location": {"display_name": "Leipzig, Sachsen"},
+            "created": "2026-10-01T09:00:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001004?utm_medium=api&utm_source=EXAMPLE",
+            "salary_is_predicted": "1",
+            "salary_min": 38000,
+            "salary_max": 44000
+          },
+          {
+            "id": "4001005",
+            "title": "Senior JavaScript Engineer",
+            "description": "Own our API layer, written in TypeScript on Express, with MySQL behind it.",
+            "company": {"display_name": "Bytewerk GmbH"},
+            "location": {"display_name": "München, Bayern", "area": ["Germany", "Bayern", "München"]},
+            "created": "2026-09-29T12:00:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001005?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 65000,
+            "salary_is_predicted": "0",
+            "contract_time": "full_time"
+          },
+          {
+            "id": "4001006",
+            "title": "<strong>Node.js</strong> Platform Developer",
+            "description": "Working with <strong>NestJS</strong> microservices. Hybrid model with two days <strong>vor Ort</strong>.",
+            "company": {"display_name": "Hafen Digital"},
+            "location": {"display_name": "Hamburg, Hamburg"},
+            "created": "2026-09-27T15:45:10Z",
+            "redirect_url": "https://www.adzuna.de/details/4001006?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 62500,
+            "salary_max": 78000,
+            "salary_is_predicted": "1"
+          },
+          {
+            "id": "4001009",
+            "title": "Office Manager (m/w/d)",
+            "description": "Organise our office, coordinate suppliers and plan team events.",
+            "company": {"display_name": "Kontor GmbH"},
+            "location": {"display_name": "Berlin, Berlin"},
+            "created": "2026-09-30T08:00:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001009?utm_medium=api&utm_source=EXAMPLE"
+          },
+          {
+            "id": "4001010",
+            "title": "Salesforce Developer",
+            "description": "Integrations with Node.js services and Apex triggers.",
+            "company": {"display_name": "CloudCRM GmbH"},
+            "location": {"display_name": "Frankfurt am Main, Hessen"},
+            "created": "2026-09-30T08:30:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001010?utm_medium=api&utm_source=EXAMPLE"
+          }
+        ]
+      }
+    ],
+    "tech-remote": [
+      {
+        "count": 2,
+        "results": [
+          {
+            "id": "4001001",
+            "title": "Senior Node.js / NestJS Backend Engineer (Remote)",
+            "description": "<strong>Fully remote</strong> role building real-time game backends with <strong>Node.js</strong>, NestJS and TypeScript. Redis, BullMQ, WebSockets and PostgreSQL in production",
+            "company": {"display_name": "Acme Games GmbH"},
+            "location": {"display_name": "Berlin, Berlin", "area": ["Germany", "Berlin", "Berlin"]},
+            "created": "2026-09-30T10:12:44Z",
+            "redirect_url": "https://www.adzuna.de/details/4001001?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 70000,
+            "salary_max": 90000,
+            "salary_is_predicted": "0",
+            "contract_type": "permanent",
+            "contract_time": "full_time",
+            "category": {"label": "IT Jobs", "tag": "it-jobs"}
+          },
+          {
+            "id": "4001008",
+            "title": "NestJS Backend Engineer",
+            "description": "Remote-first team building microservices with NestJS and MySQL.",
+            "location": {"display_name": "Germany"},
+            "created": "2026-10-01T08:00:00Z",
+            "redirect_url": "https://www.adzuna.de/details/4001008?utm_medium=api&utm_source=EXAMPLE"
+          }
+        ]
+      }
+    ]
+  },
+  "nl": {
+    "tech": [
+      {
+        "count": 1,
+        "results": [
+          {
+            "id": "5001001",
+            "title": "Backend Engineer TypeScript",
+            "description": "Hybrid working, two days per week at our Amsterdam office. Stack: TypeScript, Node.js, PostgreSQL, TypeORM and microservices.",
+            "company": {"display_name": "Tulip Software BV"},
+            "location": {"display_name": "Amsterdam, Noord-Holland", "area": ["Netherlands", "Noord-Holland", "Amsterdam"]},
+            "created": "2026-09-29T09:20:00Z",
+            "redirect_url": "https://www.adzuna.nl/details/5001001?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 65000,
+            "salary_max": 80000,
+            "salary_is_predicted": "0",
+            "contract_type": "permanent",
+            "category": {"label": "IT Jobs"}
+          }
+        ]
+      }
+    ],
+    "tech-remote": [
+      {"count": 0, "results": []}
+    ]
+  },
+  "pl": {
+    "tech": [
+      {
+        "count": 1,
+        "results": [
+          {
+            "id": "6001001",
+            "title": "Senior Node.js Developer",
+            "description": "Praca zdalna w Polsce. Node.js, NestJS, Redis i WebSockets w systemie czasu rzeczywistego.",
+            "company": {"display_name": "Wisła Tech sp. z o.o."},
+            "location": {"display_name": "Warszawa, Mazowieckie", "area": ["Poland", "Mazowieckie", "Warszawa"]},
+            "created": "2026-09-30T06:05:00Z",
+            "redirect_url": "https://www.adzuna.pl/details/6001001?utm_medium=api&utm_source=EXAMPLE",
+            "salary_min": 180000,
+            "salary_max": 240000,
+            "salary_is_predicted": "1",
+            "contract_type": "permanent",
+            "category": {"label": "IT Jobs"}
+          }
+        ]
+      }
+    ],
+    "tech-remote": [
+      {"count": 0, "results": []}
+    ]
+  },
+  "at": {
+    "tech": [{"error": 400}],
+    "tech-remote": [{"error": 400}]
+  }
+}
