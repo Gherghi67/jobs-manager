@@ -379,6 +379,28 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     }
   }
 
+  Widget syncMark(SyncHealth health) {
+    final (icon, color, label) = switch (health) {
+      SyncHealth.ok => (
+        Icons.check_circle,
+        Colors.green.shade700,
+        'Refresh succeeded',
+      ),
+      SyncHealth.failed => (
+        Icons.error,
+        Theme.of(context).colorScheme.error,
+        'Refresh failed',
+      ),
+      SyncHealth.checking => (Icons.sync, accent, 'Checking Gmail'),
+      SyncHealth.unknown => (
+        Icons.help_outline,
+        const Color(0xFF63716D),
+        'Not refreshed yet',
+      ),
+    };
+    return Icon(icon, size: 20, color: color, semanticLabel: label);
+  }
+
   Future<void> toggleApplied(Job j) async {
     if (applying.contains(j.id)) {
       return;
@@ -1049,7 +1071,24 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                   if (tab == 2)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(gmailSyncLabel(gmailSync, appliedFetchedAt)),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          syncMark(
+                            syncHealth(
+                              gmailSync,
+                              appliedFetchedAt,
+                              fetchFailed: appliedNote != null,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              gmailSyncLabel(gmailSync, appliedFetchedAt),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   if (tab == 2 && applied.isNotEmpty) ...[
                     StatsPanel(

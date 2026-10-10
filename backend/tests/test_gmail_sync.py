@@ -73,6 +73,36 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(self.sync.run_due())
         self.assertEqual(self.store.list(), [])
 
+    def test_refused_login_keeps_daily_slot_and_retries_soon(self):
+        self.fetcher.side_effect = [g.LoginError('Sign in'), output()]
+        self.assertTrue(self.sync.run_due())
+        status = self.sync.status()
+        self.assertEqual(status['error'], 'Sign in')
+        self.assertNotIn('last_attempt', status)
+        self.assertEqual(status['next_run'], g.stamp(NOW + g.LOGIN_RETRY))
+        self.sync.clock = lambda: NOW + g.LOGIN_RETRY - 1
+        self.assertFalse(self.sync.run_due())
+        self.sync.clock = lambda: NOW + g.LOGIN_RETRY
+        self.assertTrue(self.sync.run_due())
+        status = self.sync.status()
+        self.assertEqual((status['error'], status['last_success']), ('', g.stamp(NOW + g.LOGIN_RETRY)))
+        self.assertNotIn('retry_at', status)
+        self.assertEqual(self.fetcher.call_count, 2)
+        self.assertEqual(len(self.store.list()), 1)
+
+    def test_refused_login_after_success_keeps_previous_attempt(self):
+        self.sync.run_due()
+        self.sync.clock = lambda: NOW + g.DAY
+        self.fetcher.side_effect = g.LoginError('Sign in')
+        self.sync.run_due()
+        status = self.sync.status()
+        self.assertEqual((status['last_attempt'], status['last_success']), (g.stamp(NOW), g.stamp(NOW)))
+        self.sync.clock = lambda: NOW + g.DAY + g.LOGIN_RETRY
+        self.fetcher.side_effect = None
+        self.assertTrue(self.sync.run_due())
+        self.assertEqual(self.fetcher.call_args.args[1], NOW - 2 * g.DAY)
+        self.assertFalse(self.sync.run_due())
+
     def test_failure_preserves_success_watermark(self):
         self.sync.run_due()
         self.sync.clock = lambda: NOW + 5 * g.DAY
@@ -185,10 +215,12 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('PreToolUse', json.loads(cmd[cmd.index('--settings') + 1])['hooks'])
 
     def test_wrong_or_api_login_never_starts_model(self):
-        for login in [dict(loggedIn=True, authMethod='api_key', email=CONFIG['mailbox']),
-                      dict(loggedIn=True, authMethod='claude.ai', email='someone@example.com')]:
-            runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(login)))
-            with self.assertRaises(g.SyncError):
+        for code, login in [(0, json.dumps(dict(loggedIn=True, authMethod='api_key', email=CONFIG['mailbox']))),
+                            (0, json.dumps(dict(loggedIn=True, authMethod='claude.ai', email='someone@example.com'))),
+                            (1, json.dumps(dict(loggedIn=True, authMethod='claude.ai', email=CONFIG['mailbox']))),
+                            (0, 'not json'), (0, '[]')]:
+            runner = Mock(return_value=subprocess.CompletedProcess([], code, login))
+            with self.assertRaises(g.LoginError):
                 g.fetch(CONFIG, NOW-g.DAY, NOW, [], runner)
             self.assertEqual(runner.call_count, 1)
 

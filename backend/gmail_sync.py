@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / 'gmail-sync-config.json'
 STATE = ROOT / 'gmail-sync-state.json'
 DAY = 86400
+# A refused login spends no quota, so it is retried well before the next daily slot.
+LOGIN_RETRY = 600
 READ_TOOLS = ('mcp__claude_ai_Gmail__search_threads', 'mcp__claude_ai_Gmail__get_thread')
 ALLOWED_TOOLS = (*READ_TOOLS, 'ToolSearch', 'StructuredOutput')
 KINDS = ('confirmation', 'screening', 'assessment', 'interview', 'offer', 'rejection', 'update', 'sent')
@@ -60,6 +62,10 @@ class SyncError(Exception):
     pass
 
 
+class LoginError(SyncError):
+    """Raised before any model call; the attempt does not use the daily slot."""
+
+
 def stamp(value=None):
     return dt.datetime.fromtimestamp(value if value is not None else time.time(), dt.timezone.utc).isoformat(timespec='seconds')
 
@@ -90,15 +96,23 @@ def settings():
             'permissions': {'allow': list(ALLOWED_TOOLS), 'defaultMode': 'dontAsk'}}
 
 
-def fetch(config, since, until, applications, runner=subprocess.run):
-    env = ai.ranking_env({})
+def check_login(config, env, runner):
     try:
         auth = runner(['claude', 'auth', 'status', '--json'], capture_output=True, text=True, env=env, timeout=30)
         login = json.loads(auth.stdout)
-        if (auth.returncode or login.get('authMethod') != 'claude.ai' or not login.get('loggedIn') or
-                login.get('email', '').casefold() != config['claude_account_email'].casefold() or
-                (config.get('claude_org_id') and login.get('orgId') != config['claude_org_id'])):
-            raise SyncError('Sign into the configured Claude subscription on the server; Gmail sync never uses API keys or another login.')
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise LoginError('Could not check the Claude login on the server. Gmail sync retries every 10 minutes.') from None
+    if (auth.returncode or not isinstance(login, dict) or login.get('authMethod') != 'claude.ai' or not login.get('loggedIn') or
+            str(login.get('email', '')).casefold() != config['claude_account_email'].casefold() or
+            (config.get('claude_org_id') and login.get('orgId') != config['claude_org_id'])):
+        raise LoginError('Sign into the configured Claude subscription on the server; Gmail sync never uses API keys '
+                         'or another login. It retries every 10 minutes.')
+
+
+def fetch(config, since, until, applications, runner=subprocess.run):
+    env = ai.ranking_env({})
+    check_login(config, env, runner)
+    try:
         known = [{k: j.get(k, '') for k in ('id', 'company', 'title')} for j in applications]
         prompt = json.dumps(dict(mailbox=config['mailbox'], after=stamp(since), before=stamp(until), applications=known))
         cmd = ['claude', '-p', '--output-format', 'json', '--model', config.get('model', 'sonnet'),
@@ -242,7 +256,7 @@ class GmailSync:
             value = json.loads(self.state_path.read_text())
             if not isinstance(value, dict):
                 raise ValueError()
-            for key in ('last_attempt', 'last_success'):
+            for key in ('last_attempt', 'last_success', 'retry_at'):
                 if value.get(key):
                     epoch(value[key])
             return value
@@ -258,8 +272,9 @@ class GmailSync:
                 configured = config is not None
                 state = self.state()
                 return dict(state, enabled=configured, running=self.running,
-                            next_run=stamp(epoch(state['last_attempt']) + DAY) if state.get('last_attempt') else
-                            (config.get('start_after') if config else None))
+                            next_run=state.get('retry_at') or
+                            (stamp(epoch(state['last_attempt']) + DAY) if state.get('last_attempt') else
+                             (config.get('start_after') if config else None)))
             except (SyncError, OSError, ValueError) as exc:
                 return dict(enabled=False, running=False, error=str(exc) if isinstance(exc, SyncError) else 'Cannot read Gmail sync configuration.')
 
@@ -283,8 +298,13 @@ class GmailSync:
                 started = self.clock()
                 if config.get('start_after') and started < epoch(config['start_after']):
                     return False
-                if state.get('last_attempt') and started < epoch(state['last_attempt']) + DAY:
+                if state.get('retry_at'):
+                    if started < epoch(state['retry_at']):
+                        return False
+                elif state.get('last_attempt') and started < epoch(state['last_attempt']) + DAY:
                     return False
+                previous = state.pop('last_attempt', None)
+                state.pop('retry_at', None)
                 # Store the attempt before contacting Claude: failures/restarts cannot loop on quota.
                 state.update(last_attempt=stamp(started), error='Last sweep did not finish. The next daily run will retry.')
                 private_json(self.state_path, state)
@@ -294,6 +314,12 @@ class GmailSync:
                     events = validate(output, config['mailbox'], started)
                     imported = merge(self.store, events)
                     state.update(last_success=stamp(started), finished_at=stamp(self.clock()), imported=imported, error='')
+                except LoginError as exc:
+                    # Refused before the model ran: keep the previous daily slot and check again soon.
+                    state.pop('last_attempt')
+                    if previous:
+                        state['last_attempt'] = previous
+                    state.update(error=str(exc), retry_at=stamp(started + LOGIN_RETRY))
                 except Exception as exc:
                     state['error'] = str(exc) if isinstance(exc, SyncError) else 'Gmail import failed; check the server. Previous data is retained.'
                 private_json(self.state_path, state)

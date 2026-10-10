@@ -252,19 +252,41 @@ String gmailSyncLabel(Map<String, dynamic> sync, DateTime? fetched) {
   final last = success == null
       ? ''
       : ' Last Gmail sync: ${shortDate(success)}.';
+  final refreshed = fetched == null ? '' : ' Refreshed: ${shortDate(fetched)}.';
   final error = (sync['error'] ?? '').toString();
   if (sync['running'] == true) {
-    return 'Checking Gmail on the server.$last Pull to refresh after it finishes.';
+    return 'Checking Gmail on the server.$last$refreshed Pull to refresh after it finishes.';
   }
   if (error.isNotEmpty) {
-    return 'Gmail sync needs attention: $error$last';
+    return 'Gmail sync needs attention: $error$last$refreshed';
   }
   if (sync['enabled'] == true) {
     final next = DateTime.tryParse((sync['next_run'] ?? '').toString());
     if (success == null && next != null) {
-      return 'First Gmail sync scheduled for ${shortDate(next)}. Analytics refresh daily when the app is open. Pull to refresh anytime.';
+      return 'First Gmail sync scheduled for ${shortDate(next)}.$refreshed Analytics refresh daily when the app is open. Pull to refresh anytime.';
     }
-    return 'Gmail syncs daily.$last Analytics refresh daily when the app is open. Pull to refresh anytime.';
+    return 'Gmail syncs daily.$last$refreshed Analytics refresh daily when the app is open. Pull to refresh anytime.';
   }
-  return 'Analytics refresh daily when the app is open.${fetched == null ? '' : ' Fetched: ${shortDate(fetched)}.'}';
+  return 'Analytics refresh daily when the app is open.$refreshed';
+}
+
+// The mark beside that line: green after a good refresh, red when the
+// refresh or the server's Gmail sync failed.
+enum SyncHealth { ok, failed, checking, unknown }
+
+SyncHealth syncHealth(
+  Map<String, dynamic> sync,
+  DateTime? fetched, {
+  bool fetchFailed = false,
+}) {
+  if (fetchFailed) {
+    return SyncHealth.failed;
+  }
+  if (sync['running'] == true) {
+    return SyncHealth.checking;
+  }
+  if ((sync['error'] ?? '').toString().isNotEmpty) {
+    return SyncHealth.failed;
+  }
+  return fetched == null ? SyncHealth.unknown : SyncHealth.ok;
 }
