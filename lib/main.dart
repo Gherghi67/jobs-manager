@@ -1583,6 +1583,7 @@ class _OptionsPageState extends State<OptionsPage> {
   String? connection, updateMessage, rankingMessage;
   List<Map<String, dynamic>> rankingAccounts = [];
   bool checkingRanking = false;
+  Map<String, dynamic>? jevUsage;
   Map<String, dynamic>? installed, release;
   double? progress;
   bool checking = false, updating = false;
@@ -1606,6 +1607,7 @@ class _OptionsPageState extends State<OptionsPage> {
       });
     }
     if (!kIsWeb) unawaited(loadInstalled());
+    unawaited(loadJevUsage());
   }
 
   @override
@@ -1615,6 +1617,27 @@ class _OptionsPageState extends State<OptionsPage> {
     token.dispose();
     keywords.dispose();
     super.dispose();
+  }
+
+  Future<void> loadJevUsage() async {
+    if (widget.token.isEmpty) return;
+    final api = JobsApi(
+      widget.url,
+      widget.token,
+      client: widget.httpClient?.call(),
+    );
+    try {
+      final data = await api.request('/linkedin/usage');
+      if (mounted && data['total'] is Map && data['days30'] is Map) {
+        setState(() {
+          jevUsage = data;
+        });
+      }
+    } catch (_) {
+      // A service from before the usage log has no such endpoint; the line stays hidden.
+    } finally {
+      api.close();
+    }
   }
 
   Future<void> checkRanking() async {
@@ -2041,6 +2064,14 @@ class _OptionsPageState extends State<OptionsPage> {
             'LinkedIn',
             'The jev-ultrafast browser agent searches in the Chrome profile signed in to LinkedIn on your computer. Adds about 30 seconds.',
           ),
+          if (jevUsage != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                jevUsageText(jevUsage!),
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
           ...boardNames.entries.map(
             (e) => CheckboxListTile(
               contentPadding: EdgeInsets.zero,

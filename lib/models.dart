@@ -99,6 +99,43 @@ String aiSummary(Map<String, dynamic> status) {
   return note.isEmpty ? line : '$line $note';
 }
 
+String dollars(num value) => value == 0
+    ? r'$0'
+    : value < 0.0001
+    ? r'under $0.0001'
+    : '\$${value < 1 ? value.toStringAsPrecision(2) : value.toStringAsFixed(2)}';
+
+String tokenCount(num value) => value >= 1000000
+    ? '${(value / 1000000).toStringAsFixed(1)}M'
+    : value >= 1000
+    ? '${(value / 1000).toStringAsFixed(1)}k'
+    : '${value.toInt()}';
+
+// What the LinkedIn browser agent cost, from the service's /linkedin/usage.
+String jevUsageText(Map<String, dynamic> usage) {
+  num value(Map row, String key) => row[key] as num? ?? 0;
+  String period(Map row) =>
+      '${plural(value(row, 'runs').toInt(), 'search', 'searches')}, '
+      '${dollars(value(row, 'cost'))}';
+  final last = usage['last'] as Map?;
+  if (last == null) {
+    return 'Jev usage: no LinkedIn search has run the agent yet.';
+  }
+  final textCost = last['text_cost'] as num?;
+  final text = value(last, 'text_calls') == 0
+      ? ''
+      : ' Field text: ${last['text_model']}, '
+            '${textCost == null ? 'no dollar cost reported' : dollars(textCost)}.';
+  return 'Jev usage, last search: '
+      '${plural(value(last, 'requests').toInt(), 'request')}, '
+      '${tokenCount(value(last, 'input_tokens'))} input tokens, '
+      '${dollars(value(last, 'cost'))}. '
+      'Last 30 days: ${period(usage['days30'] as Map)}. '
+      'All time: ${period(usage['total'] as Map)}.$text '
+      'Estimated at \$${usage['price_per_million_input']} per million input '
+      'tokens; TypeSafe reports tokens, not dollars.';
+}
+
 String appliedDate(String isoDate) =>
     DateTime.tryParse(isoDate)?.toLocal().toString().split(' ').first ?? '';
 

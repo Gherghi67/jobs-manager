@@ -265,6 +265,8 @@ def main():
         result = dict(status='error', message=f'{type(exc).__name__}: the LinkedIn browser agent failed.')
     finally:
         if agent:
+            # The service keeps this to show what LinkedIn searches cost.
+            result['usage'] = linkedin.usage_of(agent.state)
             # For diagnosis from the command line; the service ignores it.
             result['decided'] = decisions
             result['trace'] = [f"{h['kind']} {h['action'][:80]}" + (f" = {h['text']!r}" if h['text'] else '') +

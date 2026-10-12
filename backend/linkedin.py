@@ -136,8 +136,34 @@ def posted_date(epoch_ms):
         return ''
 
 
-def fetch(o, job):
-    """Returns (jobs, warnings) like the other collectors, or raises LinkedInError."""
+def tokens(usage, *names):
+    for name in names:
+        value = usage.get(name)
+        if type(value) is int and value >= 0:
+            return value
+    return 0
+
+
+def usage_of(state):
+    """What one agent run used. Every decision is one TypeSafe request, stale ones included, and TypeSafe
+    reports tokens, not dollars. The text helper is billed in dollars only through an API (OpenRouter's
+    `cost`); through Codex it uses the subscription."""
+    decisions = [d.get('usage') or {} for d in state.get('decisions', []) if isinstance(d, dict)]
+    texts = [t for t in state.get('text_calls', []) if isinstance(t, dict)]
+    text_usage = [t.get('usage') if isinstance(t.get('usage'), dict) else {} for t in texts]
+    costs = [u['cost'] for u in text_usage if type(u.get('cost')) in (int, float) and u['cost'] >= 0]
+    return dict(requests=len(decisions),
+                input_tokens=sum(tokens(u, 'input_tokens') for u in decisions),
+                output_tokens=sum(tokens(u, 'output_tokens') for u in decisions),
+                text_calls=len(texts), text_model=str(texts[0].get('model') or '')[:80] if texts else '',
+                text_tokens=sum(tokens(u, 'input_tokens', 'prompt_tokens') + tokens(u, 'output_tokens', 'completion_tokens')
+                                for u in text_usage),
+                text_cost=round(sum(costs), 8) if costs else None)
+
+
+def fetch(o, job, record=None):
+    """Returns (jobs, warnings) like the other collectors, or raises LinkedInError.
+    record receives the run's usage, also when the run failed after the agent started."""
     if not enabled():
         raise LinkedInError(f'LinkedIn needs jev-ultrafast installed at {JEV_DIR}.')
     req = request(o)
@@ -150,6 +176,8 @@ def fetch(o, job):
         result = json.loads(done.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
         raise LinkedInError('The LinkedIn browser agent stopped without a result.') from None
+    if record and isinstance(result, dict) and isinstance(result.get('usage'), dict):
+        record(result['usage'])
     if not isinstance(result, dict) or result.get('status') != 'ok':
         message = result.get('message') if isinstance(result, dict) else None
         raise LinkedInError(str(message or 'The LinkedIn browser agent failed.')[:300])

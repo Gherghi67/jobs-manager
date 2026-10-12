@@ -24,6 +24,10 @@ APP_DIR = ROOT.parent / 'artifacts'
 WEB_DIR = ROOT.parent / 'build' / 'web'
 CV_DIR = Path(os.environ.get('JOBS_CV_DIR') or ROOT.parent / 'cv')
 APPLIED_FILE = Path(os.environ.get('JOBS_APPLIED_FILE') or ROOT / 'applied.json')
+JEV_USAGE_FILE = Path(os.environ.get('JOBS_JEV_USAGE_FILE') or ROOT / 'jev-usage.json')
+# US dollars per million Jev input tokens; output is free. TypeSafe's docs publish no price and its responses
+# carry tokens only, so this is the rate third-party listings gave in October 2026. JOBS_JEV_PRICE overrides it.
+JEV_PRICE = 0.042
 sys.path.insert(0, str(ROOT / 'vendor'))
 import adzuna_search as az
 import remote_search as remote
@@ -443,13 +447,89 @@ class AppliedStore:
         return kept + marked, len(jobs) - len(kept) - len(marked)
 
 
+def jev_price():
+    try:
+        price = float(os.environ.get('JOBS_JEV_PRICE') or JEV_PRICE)
+    except ValueError:
+        return JEV_PRICE
+    return price if 0 <= price < 1000 else JEV_PRICE
+
+
+class JevUsage:
+    """What the LinkedIn browser agent used on each search, kept on the service for the app.
+    Dollars are an estimate from input tokens at the configured price, plus any text-helper cost an API billed."""
+    FIELDS = ('requests', 'input_tokens', 'output_tokens', 'text_calls', 'text_tokens')
+    KEEP = 500
+
+    def __init__(self, path, price=JEV_PRICE, clock=time.time):
+        self.path, self.price, self.clock = Path(path), price, clock
+        self.lock = threading.Lock()
+        self.data = None
+
+    def load(self):
+        if self.data is None:
+            try:
+                data = json.loads(self.path.read_text())
+                if not isinstance(data.get('runs'), list) or not isinstance(data.get('total'), dict):
+                    raise TypeError
+            except FileNotFoundError:
+                data = dict(runs=[], total={})
+            except (OSError, ValueError, AttributeError, TypeError):
+                # Never overwrite a file we could not read.
+                raise StoreError(f'{self.path.name} on the service could not be read.')
+            self.data = data
+        return self.data
+
+    def add(self, usage):
+        """Never raises: losing one record must not lose the search's LinkedIn roles."""
+        row = {k: usage[k] if type(usage.get(k)) is int and usage[k] >= 0 else 0 for k in self.FIELDS}
+        cost = usage.get('text_cost')
+        row.update(text_cost=float(cost) if type(cost) in (int, float) and cost >= 0 else None,
+                   text_model=str(usage.get('text_model') or '')[:80],
+                   at=dt.datetime.fromtimestamp(self.clock(), dt.timezone.utc).isoformat(timespec='seconds'))
+        try:
+            with self.lock:
+                data = self.load()
+                data['runs'] = (data['runs'] + [row])[-self.KEEP:]
+                # Running totals outlive the runs that KEEP drops.
+                data['total'] = self.sum([data['total'], dict(row, runs=1)])
+                temp = self.path.with_name(self.path.name + '.tmp')
+                with os.fdopen(os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), 'w') as f:
+                    json.dump(data, f, indent=1)
+                os.replace(temp, self.path)
+        except (OSError, StoreError) as exc:
+            print(f'Jev usage was not recorded: {exc}', file=sys.stderr, flush=True)
+
+    def sum(self, rows):
+        total = {k: sum(r.get(k) or 0 for r in rows) for k in ('runs',) + self.FIELDS}
+        costs = [r['text_cost'] for r in rows if r.get('text_cost') is not None]
+        total['text_cost'] = round(sum(costs), 8) if costs else None
+        return total
+
+    def priced(self, row):
+        jev = round(row['input_tokens'] * self.price / 1e6, 8)
+        return dict(row, jev_cost=jev, cost=round(jev + (row.get('text_cost') or 0), 8))
+
+    def summary(self):
+        """The last run, the last 30 days and all time. Raises StoreError."""
+        cutoff = dt.datetime.fromtimestamp(self.clock() - 30 * 86400, dt.timezone.utc).isoformat(timespec='seconds')
+        with self.lock:
+            data = copy.deepcopy(self.load())
+        recent = [r for r in data['runs'] if r['at'] >= cutoff]
+        return dict(price_per_million_input=self.price,
+                    last=self.priced(data['runs'][-1]) if data['runs'] else None,
+                    days30=self.priced(dict(self.sum(recent), runs=len(recent))),
+                    total=self.priced(self.sum([data['total']])))
+
+
 class Engine:
-    def __init__(self, applied=None):
+    def __init__(self, applied=None, jev_usage=None):
         self.lock = threading.Lock()
         self.runs = {}
         self.cache = {}
         self.ai_cache = {}
         self.applied = applied or AppliedStore(APPLIED_FILE)
+        self.jev_usage = jev_usage or JevUsage(JEV_USAGE_FILE, jev_price())
 
     def start(self, options):
         o = validate_options(options)
@@ -531,7 +611,7 @@ class Engine:
                         (rows, warnings), cached = self.cached(cache_key, lambda: self.adzuna(o))
                     elif name == 'linkedin':
                         cache_key = json.dumps(['linkedin', linkedin.request(o)], sort_keys=True)
-                        (rows, warnings), cached = self.cached(cache_key, lambda: linkedin.fetch(o, remote.job))
+                        (rows, warnings), cached = self.cached(cache_key, lambda: linkedin.fetch(o, remote.job, record=self.jev_usage.add))
                     else:
                         options = copy.deepcopy(options)
                         if name == 'himalayas':
@@ -688,6 +768,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(500, {'error': str(exc)})
         elif path == '/gmail-sync':
             self.respond(200, self.gmail.status() if self.gmail else {'enabled': False})
+        elif path == '/linkedin/usage':
+            try:
+                self.respond(200, self.engine.jev_usage.summary())
+            except StoreError as exc:
+                self.respond(500, {'error': str(exc)})
         elif path == '/app/fieldwork.apk':
             self.send_file(APP_DIR / 'fieldwork.apk', 'application/vnd.android.package-archive',
                            'No app build is published on the service.')

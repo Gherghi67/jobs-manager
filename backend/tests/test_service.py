@@ -335,7 +335,8 @@ class ApiTests(unittest.TestCase):
         cls.url = 'http://127.0.0.1:%d' % cls.server.server_port
         cls.folder = tempfile.TemporaryDirectory()
         cls.engine = s.Handler.engine
-        s.Handler.engine = s.Engine(s.AppliedStore(Path(cls.folder.name) / 'applied.json'))
+        s.Handler.engine = s.Engine(s.AppliedStore(Path(cls.folder.name) / 'applied.json'),
+                                    s.JevUsage(Path(cls.folder.name) / 'jev-usage.json'))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
     @classmethod
@@ -349,6 +350,14 @@ class ApiTests(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else None
         with urlopen(Request(self.url + path, data=data, headers=headers, method=method)) as r:
             return json.load(r)
+    def test_linkedin_usage_endpoint(self):
+        s.Handler.engine.jev_usage.add(dict(requests=2, input_tokens=6000, output_tokens=400))
+        usage = self.call('GET', '/linkedin/usage')
+        self.assertEqual((usage['last']['requests'], usage['days30']['runs'], usage['total']['input_tokens']), (2, 1, 6000))
+        self.assertEqual(usage['price_per_million_input'], s.JEV_PRICE)
+        with self.assertRaises(HTTPError) as e:
+            self.call('GET', '/linkedin/usage', token=False)
+        self.assertEqual(e.exception.code, 401)
     def test_applied_endpoints(self):
         row = s.rank([job()], s.validate_options({}))[0]
         self.assertEqual(self.call('GET', '/applied'), {'jobs': [], 'gmail_sync': {'enabled': False}})

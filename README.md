@@ -159,7 +159,8 @@ Every search also asks LinkedIn Jobs, after the other sources, because it takes 
 
 **Cost and limits.**
 - An uncached search makes about three TypeSafe requests on jev's key and one Codex request on your ChatGPT sign-in, for the typed keywords.
-- Results are cached for an hour, like other sources.
+- **Options → Job sources** shows the usage under the LinkedIn switch: the last search's TypeSafe requests, input tokens and cost, then the last 30 days and all time. The runner adds each run's usage to its result, including failed runs that reached the agent; stale decisions count, because each one is a request. The service keeps it in gitignored `backend/jev-usage.json` (`JOBS_JEV_USAGE_FILE`; the last 500 runs plus running totals) and serves it at `GET /linkedin/usage`. TypeSafe reports tokens, not dollars, and its docs publish no price, so dollars are estimated at $0.042 per million input tokens (output is free), the rate third-party listings gave in October 2026. Set `JOBS_JEV_PRICE` if that changes. Field text through Codex runs on the subscription, so it has no dollar cost; through an API, OpenRouter's reported `cost` is added. A run killed by the 240-second backstop records nothing.
+- Results are cached for an hour, like other sources. A cached result runs no agent and costs nothing.
 - LinkedIn's terms forbid automated access. This uses your own account at personal volume, but LinkedIn can still restrict accounts it flags.
 
 **Switching it off.** Turn off **Options → Job sources → LinkedIn** (on by default; saved on the phone), or set `JOBS_LINKEDIN=off` on the service. LinkedIn alone counts as an enabled source. `/health` reports `linkedin_available`, and **Test connection** says whether the LinkedIn agent is ready. Build 29863531 has the switch and the summary line "Adzuna + LinkedIn + 8 remote boards"; checked on the emulator, and `test/ranking_options_test.dart` covers it.

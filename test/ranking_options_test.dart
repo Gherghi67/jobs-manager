@@ -232,6 +232,69 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  test('the Jev usage line prices the last search and the periods', () {
+    expect(
+      jevUsageText({
+        'price_per_million_input': 0.042,
+        'last': {
+          'requests': 14,
+          'input_tokens': 42100,
+          'cost': 0.00177,
+          'text_calls': 1,
+          'text_model': 'Codex (default model)',
+          'text_cost': null,
+        },
+        'days30': {'runs': 6, 'cost': 0.0112},
+        'total': {'runs': 1, 'cost': 0.25},
+      }),
+      r'Jev usage, last search: 14 requests, 42.1k input tokens, $0.0018. '
+      r'Last 30 days: 6 searches, $0.011. All time: 1 search, $0.25. '
+      'Field text: Codex (default model), no dollar cost reported. '
+      r'Estimated at $0.042 per million input tokens; '
+      'TypeSafe reports tokens, not dollars.',
+    );
+    expect(
+      jevUsageText({'last': null, 'days30': {}, 'total': {}}),
+      'Jev usage: no LinkedIn search has run the agent yet.',
+    );
+    expect(dollars(0), r'$0');
+    expect(dollars(0.00002), r'under $0.0001');
+    expect(dollars(12.5), r'$12.50');
+    expect(tokenCount(1250000), '1.3M');
+  });
+
+  testWidgets('search options show the Jev usage under LinkedIn', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'token': 'test-token'});
+    http.Client client() => MockClient((r) async {
+      if (r.url.path == '/linkedin/usage') {
+        return http.Response(
+          jsonEncode({
+            'price_per_million_input': 0.042,
+            'last': {'requests': 9, 'input_tokens': 27000, 'cost': 0.001134},
+            'days30': {'runs': 2, 'cost': 0.0023},
+            'total': {'runs': 2, 'cost': 0.0023},
+          }),
+          200,
+        );
+      }
+      return http.Response('{"jobs":[]}', 200);
+    });
+    await tester.pumpWidget(JobsApp(httpClient: client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search options'));
+    await tester.pumpAndSettle();
+    final line = find.textContaining('Jev usage, last search: 9 requests');
+    await tester.scrollUntilVisible(
+      line,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(line, findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   test('ranking labels preserve the engine of saved results', () {
     expect(
       aiSummary({

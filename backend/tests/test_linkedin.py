@@ -1,4 +1,6 @@
+import contextlib
 import datetime
+import io
 import json
 import os
 from pathlib import Path
@@ -160,6 +162,87 @@ class FetchTests(unittest.TestCase):
         with patch.object(linkedin, 'enabled', return_value=False), self.assertRaises(linkedin.LinkedInError):
             linkedin.fetch(self.options, s.remote.job)
 
+    def test_usage_is_recorded_for_finished_and_failed_runs(self):
+        usage = dict(requests=3, input_tokens=9000, output_tokens=600)
+        for result in (dict(status='ok', jobs=[], usage=usage), dict(status='error', message='Stopped.', usage=usage),
+                       dict(status='error', message='Chrome is closed.')):
+            recorded = []
+            with self.subTest(result=result), patch.object(
+                    linkedin.subprocess, 'run',
+                    lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr='')):
+                try:
+                    linkedin.fetch(self.options, s.remote.job, record=recorded.append)
+                except linkedin.LinkedInError:
+                    self.assertEqual(result['status'], 'error')
+                self.assertEqual(recorded, [usage] if 'usage' in result else [])
+
+
+class UsageTests(unittest.TestCase):
+    def test_usage_counts_every_decision_and_the_text_helper(self):
+        state = dict(decisions=[{'usage': {'input_tokens': 3000, 'output_tokens': 200}},
+                                {'usage': {'input_tokens': 2900, 'output_tokens': 210}},  # a stale decision is billed too
+                                {'usage': {}}],
+                     text_calls=[{'model': 'gpt-6.1-sol', 'usage': {'input_tokens': 400, 'cached_input_tokens': 0, 'output_tokens': 12}}])
+        self.assertEqual(linkedin.usage_of(state), dict(requests=3, input_tokens=5900, output_tokens=410, text_calls=1,
+                                                        text_model='gpt-6.1-sol', text_tokens=412, text_cost=None))
+        api = dict(decisions=[], text_calls=[{'model': 'inception/mercury-2.5',
+                                              'usage': {'prompt_tokens': 447, 'completion_tokens': 51, 'cost': 2.553e-05}},
+                                             {'model': 'inception/mercury-2.5', 'usage': {'prompt_tokens': 10, 'cost': True}}])
+        self.assertEqual(linkedin.usage_of(api), dict(requests=0, input_tokens=0, output_tokens=0, text_calls=2,
+                                                      text_model='inception/mercury-2.5', text_tokens=508, text_cost=2.553e-05))
+        self.assertEqual(linkedin.usage_of({})['requests'], 0)
+
+
+class JevUsageTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.path = Path(self.folder.name) / 'jev-usage.json'
+        self.now = datetime.datetime(2026, 10, 12, 12, tzinfo=datetime.timezone.utc).timestamp()
+        self.log = s.JevUsage(self.path, price=0.042, clock=lambda: self.now)
+
+    def test_summary_prices_the_last_run_the_last_30_days_and_all_time(self):
+        self.assertEqual(self.log.summary()['last'], None)
+        self.assertEqual(self.log.summary()['total']['cost'], 0)
+        self.now -= 40 * 86400
+        self.log.add(dict(requests=10, input_tokens=1_000_000, output_tokens=5000))
+        self.now += 40 * 86400
+        self.log.add(dict(requests=4, input_tokens=50_000, output_tokens=900, text_calls=1, text_tokens=300,
+                          text_model='inception/mercury-2.5', text_cost=0.0001, junk='x'))
+        summary = s.JevUsage(self.path, price=0.042, clock=lambda: self.now).summary()  # read back from disk
+        self.assertEqual(summary['price_per_million_input'], 0.042)
+        self.assertEqual(summary['last']['requests'], 4)
+        self.assertEqual(summary['last']['jev_cost'], 0.0021)
+        self.assertEqual(summary['last']['cost'], 0.0022)
+        self.assertNotIn('junk', summary['last'])
+        self.assertEqual((summary['days30']['runs'], summary['days30']['input_tokens']), (1, 50_000))
+        self.assertEqual((summary['total']['runs'], summary['total']['requests']), (2, 14))
+        self.assertEqual(summary['total']['jev_cost'], 0.0441)
+        self.assertEqual(summary['total']['text_cost'], 0.0001)
+        self.assertEqual(oct(self.path.stat().st_mode & 0o777), '0o600')
+
+    def test_dropped_runs_stay_in_the_total(self):
+        with patch.object(s.JevUsage, 'KEEP', 2):
+            for _ in range(3):
+                self.log.add(dict(requests=1, input_tokens=10))
+        data = json.loads(self.path.read_text())
+        self.assertEqual(len(data['runs']), 2)
+        self.assertEqual(self.log.summary()['total']['runs'], 3)
+
+    def test_an_unreadable_file_is_kept_and_never_raises_on_add(self):
+        self.path.write_text('not json')
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.log.add(dict(requests=1))
+        self.assertIn('not recorded', err.getvalue())
+        self.assertEqual(self.path.read_text(), 'not json')
+        with self.assertRaises(s.StoreError):
+            self.log.summary()
+
+    def test_price_comes_from_the_environment_when_valid(self):
+        for value, price in (('0.05', 0.05), ('free', s.JEV_PRICE), ('-1', s.JEV_PRICE), ('', s.JEV_PRICE)):
+            with self.subTest(value=value), patch.dict(os.environ, {'JOBS_JEV_PRICE': value}):
+                self.assertEqual(s.jev_price(), price)
+
 
 class Stale(Exception):
     pass
@@ -292,19 +375,27 @@ class EngineTests(unittest.TestCase):
         return self.engine.get('x')
 
     def test_linkedin_runs_last_and_its_roles_are_ranked(self):
-        result = self.run_search(lambda o, job: (linkedin.to_jobs([item()], job), []))
+        result = self.run_search(lambda o, job, record=None: (linkedin.to_jobs([item()], job), []))
         self.assertEqual([x['name'] for x in result['sources']], ['remotive', 'linkedin'])
         self.assertEqual([j['source'] for j in result['jobs']], ['linkedin'])
 
     def test_linkedin_errors_keep_their_message(self):
-        def fail(o, job):
+        def fail(o, job, record=None):
             raise linkedin.LinkedInError('No open Chrome profile is signed in to LinkedIn.')
         result = self.run_search(fail)
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(result['sources'][1]['message'], 'No open Chrome profile is signed in to LinkedIn.')
 
+    def test_a_search_records_the_agent_usage(self):
+        self.engine.jev_usage = s.JevUsage(Path(self.folder.name) / 'jev-usage.json')
+        def fetch(o, job, record=None):
+            record(dict(requests=5, input_tokens=15000, output_tokens=1000))
+            return [], []
+        self.run_search(fetch)
+        self.assertEqual(self.engine.jev_usage.summary()['last']['requests'], 5)
+
     def test_switched_off_per_search(self):
-        def never(o, job):
+        def never(o, job, record=None):
             raise AssertionError('LinkedIn should not run')
         result = self.run_search(never, linkedin=False)
         self.assertEqual([x['name'] for x in result['sources']], ['remotive'])
