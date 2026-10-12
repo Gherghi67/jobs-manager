@@ -65,6 +65,13 @@ class RankingTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 s.validate_options(options)
 
+    def test_every_adzuna_market_can_be_searched_once(self):
+        markets = ['us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr']
+        self.assertEqual(s.validate_options({'countries': markets})['countries'], markets)
+        for countries in (markets + ['fr'], ['de', 'de'], ['ro']):
+            with self.subTest(countries=countries), self.assertRaises(ValueError):
+                s.validate_options({'countries': countries})
+
 class AppliedTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()

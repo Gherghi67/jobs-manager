@@ -33,6 +33,8 @@ import gmail_sync
 import linkedin
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
+# The markets the app offers. All eight with the broad preset's 4 queries make 32 calls at 2.5 s apart.
+ADZUNA_MARKETS = ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr')
 DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
                 keywords='', remote_only=True, eligibility='romania', contract_only=False,
                 prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal',
@@ -60,8 +62,11 @@ def validate_options(value):
             raise ValueError(f'{key} must be true or false.')
     if not isinstance(o['boards'], list) or any(x not in PUBLIC_SOURCES for x in o['boards']):
         raise ValueError('Unknown remote board.')
-    if not isinstance(o['countries'], list) or not 1 <= len(o['countries']) <= 7 or any(x not in ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr') for x in o['countries']):
-        raise ValueError('Choose 1–7 supported Adzuna countries.')
+    countries = o['countries']
+    # Each market costs one Adzuna call per query, so a market may be listed only once.
+    if (not isinstance(countries, list) or not countries or any(x not in ADZUNA_MARKETS for x in countries)
+            or len(set(countries)) != len(countries)):
+        raise ValueError('Choose supported Adzuna countries, each once.')
     if not o['adzuna'] and not (o['linkedin'] and linkedin.enabled()) and not o['boards']:
         raise ValueError('Enable at least one source.')
     if o['eligibility'] not in ('romania', 'romania_unclear', 'all'):

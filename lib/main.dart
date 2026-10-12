@@ -2029,11 +2029,7 @@ class _OptionsPageState extends State<OptionsPage> {
                         selected: (o['countries'] as List).contains(e.key),
                         onSelected: (v) => setState(() {
                           final countries = o['countries'] as List;
-                          if (v && countries.length < 7) {
-                            countries.add(e.key);
-                          } else if (!v) {
-                            countries.remove(e.key);
-                          }
+                          v ? countries.add(e.key) : countries.remove(e.key);
                         }),
                       ),
                     )

@@ -174,6 +174,64 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('every Adzuna market can be selected at once', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'token': 'test-token',
+      'options': jsonEncode({
+        'countries': ['us', 'gb', 'de', 'nl', 'pl', 'at', 'es'],
+      }),
+    });
+    Map<String, dynamic>? request;
+    http.Client client() => MockClient((r) async {
+      if (r.url.path == '/search') {
+        request = jsonDecode(r.body) as Map<String, dynamic>;
+        return http.Response('{"id":"test"}', 202);
+      }
+      if (r.url.path == '/search/test') {
+        return http.Response(
+          jsonEncode({
+            'status': 'complete',
+            'current': 'Search complete',
+            'fetched': 0,
+            'sources': [],
+            'jobs': [],
+            'updated_at': '2026-10-12T12:00:00Z',
+          }),
+          200,
+        );
+      }
+      return http.Response('{"jobs":[]}', 200);
+    });
+    await tester.pumpWidget(JobsApp(httpClient: client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search options'));
+    await tester.pumpAndSettle();
+    final france = find.widgetWithText(FilterChip, 'France');
+    await tester.scrollUntilVisible(
+      france,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(france);
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(france).selected, isTrue);
+    await tester.tap(find.text('Save options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find opportunities'));
+    await tester.pumpAndSettle();
+    expect(request!['countries'], [
+      'us',
+      'gb',
+      'de',
+      'nl',
+      'pl',
+      'at',
+      'es',
+      'fr',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+
   test('ranking labels preserve the engine of saved results', () {
     expect(
       aiSummary({
