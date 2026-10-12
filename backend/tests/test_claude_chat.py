@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,14 @@ def assistant(*blocks, parent=None):
 def result(text='Done.', error=False, session='session-1', **fields):
     return event('result', subtype='error_during_execution' if error else 'success', is_error=error, result=text,
                  session_id=session, duration_ms=1200, **fields)
+
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'\0' * 24
+JPEG = b'\xff\xd8\xff\xe0' + b'\0' * 24
+
+
+def b64(data):
+    return base64.b64encode(data).decode()
 
 
 class FakeProc:
@@ -72,12 +81,14 @@ class FakePopen:
     def __init__(self):
         self.calls = []
         self.procs = []
+        self.started = []
     def queue(self, proc):
         self.procs.append(proc)
         return proc
     def __call__(self, cmd, **kwargs):
         self.calls.append((cmd, kwargs))
-        return self.procs.pop(0)
+        self.started.append(self.procs.pop(0))
+        return self.started[-1]
 
 
 def finished(store, chat_id):
@@ -181,10 +192,15 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn('--resume', cmd)
         self.assertNotIn('bypassPermissions', cmd)
         self.assertNotIn('--dangerously-skip-permissions', cmd)
+        self.assertEqual((cmd[cmd.index('--model') + 1], cmd[cmd.index('--effort') + 1]), ('claude-opus-5-5', 'xhigh'))
         self.assertEqual((kwargs['cwd'], kwargs['start_new_session']), (self.project(), True))
         # The subscription login, never the shell's API key; the prompt goes on stdin, not the command line.
         self.assertNotIn('ANTHROPIC_API_KEY', kwargs['env'])
         self.assertNotIn('What changed', ' '.join(cmd))
+        self.assertEqual(cmd[cmd.index('--input-format') + 1], 'stream-json')
+        sent = json.loads(''.join(self.popen.started[0].prompt))
+        self.assertEqual(sent, {'type': 'user', 'message': {'role': 'user', 'content': [
+            {'type': 'text', 'text': '  What changed today?\nIn this repo.'}]}})
 
         self.popen.queue(FakeProc([result('Second answer', session='s1')]))
         second = self.store.send(chat['id'], 'And now?')
@@ -226,6 +242,40 @@ class StoreTests(unittest.TestCase):
         chat = self.store.create(self.project(), 'Hello')
         turn = finished(self.store, chat['id'])['turns'][0]
         self.assertEqual((turn['status'], turn['error']), ('error', 'Error: not logged in'))
+
+    def test_images_go_to_claude_and_stay_for_the_app(self):
+        self.popen.queue(FakeProc([result('A red square.')]))
+        chat = self.store.create(self.project(), '', [b64(PNG)])
+        self.assertEqual((chat['title'], chat['turns'][0]['images']), ('Photo', [{'name': '0-1.png', 'type': 'image/png'}]))
+        finished(self.store, chat['id'])
+        saved = self.store.image(chat['id'], '0-1.png')
+        self.assertEqual((saved.read_bytes(), oct(saved.stat().st_mode & 0o777)), (PNG, '0o600'))
+        content = json.loads(''.join(self.popen.started[0].prompt))['message']['content']
+        self.assertEqual(content, [{'type': 'text', 'text': f'[Image 1: {saved}]'},
+                                   {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': b64(PNG)}}])
+
+        self.popen.queue(FakeProc([result('Two photos.')]))
+        self.store.send(chat['id'], 'Compare these', [b64(JPEG), b64(PNG)])
+        finished(self.store, chat['id'])
+        turn = self.store.get(chat['id'], 1)['turns'][0]
+        self.assertEqual([i['name'] for i in turn['images']], ['1-1.jpg', '1-2.png'])
+        content = json.loads(''.join(self.popen.started[1].prompt))['message']['content']
+        self.assertTrue(content[0]['text'].startswith('Compare these\n\n[Image 1: '))
+        self.assertEqual([c['source']['media_type'] for c in content[1:]], ['image/jpeg', 'image/png'])
+
+        for name in ('../chats.json', '0-1.exe', '9-1.png'):
+            self.assertIsNone(self.store.image(chat['id'], name))
+        self.assertIsNone(self.store.image('missing', '0-1.png'))
+        self.assertTrue(self.store.remove(chat['id']))
+        self.assertFalse((self.path.parent / 'chat-images' / chat['id']).exists())
+
+    def test_invalid_images(self):
+        for images in ['not a list', [b64(PNG)] * (cc.MAX_IMAGES + 1), ['%%%'], [b64(b'plain text')], [7],
+                       ['A' * (cc.IMAGE_BYTES * 2)]]:
+            with self.subTest(images=str(images)[:20]), self.assertRaises(ValueError):
+                self.store.create(self.project(), 'Look', images)
+        self.assertEqual((self.store.list(), self.popen.calls), ([], []))
+        self.assertFalse((self.path.parent / 'chat-images').exists())
 
     def test_invalid_requests(self):
         for cwd, text in [('/etc', 'Hi'), (self.project(), ''), (self.project(), '   '), (self.project(), 'x' * (cc.PROMPT_CHARS + 1)),
@@ -292,6 +342,7 @@ class ApiTests(unittest.TestCase):
         project = str((Path(self.folder.name) / 'project').resolve())
         self.assertEqual((status, body['default'], [f['name'] for f in body['folders']]),
                          (200, str(Path(self.folder.name).resolve()), [Path(self.folder.name).name, 'project']))
+        self.assertEqual((body['model'], body['effort']), ('claude-opus-5-5', 'xhigh'))
         proc = self.popen.queue(FakeProc([text_delta('On it'), result('All done.')], hold=True))
         status, body = self.call('POST', '/claude/chats', {'cwd': project, 'text': 'Run the tests'})
         chat = body['chat']
@@ -308,6 +359,17 @@ class ApiTests(unittest.TestCase):
         status, body = self.call('GET', f'/claude/chats/{chat["id"]}?from=1')
         self.assertEqual((body['chat']['start'], body['chat']['turn_count'], len(body['chat']['turns'])), (1, 2, 1))
         self.assertEqual(self.call('POST', f'/claude/chats/{chat["id"]}/stop', {})[1]['chat']['running'], False)
+        self.popen.queue(FakeProc([result('A photo.')]))
+        status, body = self.call('POST', f'/claude/chats/{chat["id"]}/messages', {'text': '', 'images': [b64(JPEG)]})
+        self.assertEqual((status, body['chat']['turns'][0]['images']), (202, [{'name': '2-1.jpg', 'type': 'image/jpeg'}]))
+        finished(s.Handler.chats, chat['id'])
+        with urlopen(Request(f'{self.url}/claude/chats/{chat["id"]}/images/2-1.jpg',
+                             headers={'Authorization': 'Bearer ' + self.token})) as r:
+            self.assertEqual((r.status, r.headers['Content-Type'], r.read()), (200, 'image/jpeg', JPEG))
+        self.assertEqual(self.error('GET', f'/claude/chats/{chat["id"]}/images/2-1.jpg', token=False)[0], 401)
+        self.assertEqual(self.error('GET', f'/claude/chats/{chat["id"]}/images/..%2Fchats.json')[0], 404)
+        self.assertEqual(self.error('POST', f'/claude/chats/{chat["id"]}/messages', {'text': '', 'images': ['eA==']}),
+                         (400, {'error': 'Send images as JPEG, PNG, GIF or WebP.'}))
         self.assertEqual([c['id'] for c in self.call('GET', '/claude/chats')[1]['chats']], [chat['id']])
         self.assertEqual(self.call('DELETE', f'/claude/chats/{chat["id"]}')[1], {'removed': True})
         self.assertEqual(self.call('GET', '/claude/chats')[1], {'chats': []})

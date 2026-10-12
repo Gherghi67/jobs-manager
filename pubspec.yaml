@@ -1,5 +1,5 @@
 name: jobs_manager
-description: Personal Android job search across Adzuna and remote job boards.
+description: Personal job search for Android and the web across Adzuna and remote job boards.
 publish_to: none
 version: 1.0.0+1
 environment:
@@ -7,9 +7,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  web: ^1.1.1
   http: ^1.6.0
   shared_preferences: ^2.5.3
   url_launcher: ^6.3.2
+  image_picker: ^1.2.4
 dev_dependencies:
   flutter_test:
     sdk: flutter

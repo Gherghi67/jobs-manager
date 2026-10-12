@@ -9,10 +9,11 @@ const boardNames = <String, String>{
   'hackernews': 'Hacker News',
 };
 
-// Display names for every source key the service reports, including Adzuna and
-// the gaming preset's studio boards.
+// Display names for every source key the service reports, including Adzuna,
+// LinkedIn and the gaming preset's studio boards.
 const sourceNames = <String, String>{
   'adzuna': 'Adzuna',
+  'linkedin': 'LinkedIn',
   ...boardNames,
   'greenhouse': 'Greenhouse',
   'lever': 'Lever',
@@ -30,6 +31,7 @@ String plural(int count, String one, [String? many]) =>
 Map<String, dynamic> defaultOptions() => {
   'preset': 'broad',
   'adzuna': true,
+  'linkedin': true,
   'boards': boardNames.keys.toList(),
   'countries': ['de', 'nl', 'gb'],
   'keywords': '',
@@ -42,6 +44,18 @@ Map<String, dynamic> defaultOptions() => {
   'ai_engine': 'claude',
   'ai_subscription': 'personal',
 };
+
+// The service takes at most this many dismissed ids with a search.
+const maxDismissedSent = 2000;
+
+// The latest dismissals, oldest first; a Dart set keeps insertion order.
+List<String> recentDismissed(Set<String> dismissed) => dismissed
+    .skip(
+      dismissed.length > maxDismissedSent
+          ? dismissed.length - maxDismissedSent
+          : 0,
+    )
+    .toList();
 
 String eligibilityLabel(String value) => switch (value) {
   'worldwide' => 'Worldwide',

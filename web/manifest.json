@@ -1,0 +1,10 @@
+{
+  "name": "Fieldwork — Jobs",
+  "short_name": "Fieldwork",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#f5f5ef",
+  "theme_color": "#146b57",
+  "description": "Find your next role and track your applications.",
+  "icons": [{"src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]
+}

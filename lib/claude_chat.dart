@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'adaptive.dart';
 import 'applications.dart' show shortDate;
 
 const _ink = Color(0xFF172C2A);
@@ -18,6 +22,40 @@ const suggestions = [
   'What changed in my projects today?',
   'Draft a follow-up for an application',
 ];
+
+// The service's limits on photos sent with one message.
+const maxPhotos = 5;
+const maxPhotoBytes = 3750000;
+
+typedef Photo = ({Uint8List bytes, String name});
+typedef PhotoPicker = Future<List<Photo>> Function({
+  required bool camera,
+  required int limit,
+});
+
+// Picks photos from the phone, shrunk so uploads stay small and within Claude's limits.
+Future<List<Photo>> pickPhotos({
+  required bool camera,
+  required int limit,
+}) async {
+  final picker = ImagePicker();
+  final files = camera
+      ? [
+          ?await picker.pickImage(
+            source: ImageSource.camera,
+            maxWidth: 2048,
+            maxHeight: 2048,
+            imageQuality: 85,
+          ),
+        ]
+      : await picker.pickMultiImage(
+          maxWidth: 2048,
+          maxHeight: 2048,
+          imageQuality: 85,
+          limit: limit,
+        );
+  return [for (final f in files) (bytes: await f.readAsBytes(), name: f.name)];
+}
 
 // When a chat was last active, in words.
 String chatAge(String iso, DateTime now) {
@@ -96,7 +134,8 @@ List<({String text, bool code})> replyParts(String text) {
 // Talks to Claude Code on the computer that runs the job service.
 class ClaudePage extends StatefulWidget {
   final JobsApi Function() api;
-  const ClaudePage({super.key, required this.api});
+  final PhotoPicker pick;
+  const ClaudePage({super.key, required this.api, this.pick = pickPhotos});
   @override
   State<ClaudePage> createState() => _ClaudePageState();
 }
@@ -107,7 +146,11 @@ class _ClaudePageState extends State<ClaudePage> {
   List<Map<String, dynamic>> folders = [], chats = [];
   Map<String, dynamic>? chat;
   List<Map<String, dynamic>> turns = [];
-  String? cwd, error, pollError;
+  // Photos waiting to go with the next message.
+  List<Photo> attached = [];
+  // Photos already sent, by chat and file name, fetched once.
+  final Map<String, Future<Uint8List>> images = {};
+  String? cwd, error, pollError, model;
   bool loading = true, sending = false;
   Timer? poller;
   // Bumped when another chat opens, so late answers for the old one are dropped.
@@ -148,6 +191,10 @@ class _ClaudePageState extends State<ClaudePage> {
       ];
       final remembered = prefs.getString('claude_cwd');
       setState(() {
+        model = [
+          results[0]['model'],
+          if (results[0]['effort'] != null) '${results[0]['effort']} effort',
+        ].whereType<String>().join(' · ');
         cwd = folders.any((f) => f['path'] == remembered)
             ? remembered
             : (results[0]['default'] as String?);
@@ -262,9 +309,70 @@ class _ClaudePageState extends State<ClaudePage> {
     schedulePoll();
   }
 
+  Future<void> attach() async {
+    final camera = await showModalBottomSheet<bool>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Choose photos'),
+              onTap: () => Navigator.pop(sheet, false),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take a photo'),
+              onTap: () => Navigator.pop(sheet, true),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (camera == null) {
+      return;
+    }
+    try {
+      final picked = await widget.pick(
+        camera: camera,
+        limit: maxPhotos - attached.length,
+      );
+      if (!mounted) {
+        return;
+      }
+      final fits = picked.where((p) => p.bytes.length <= maxPhotoBytes);
+      setState(() {
+        error = fits.length < picked.length
+            ? 'Photos over ${maxPhotoBytes ~/ 1000000} MB were left out.'
+            : null;
+        attached = [...attached, ...fits].take(maxPhotos).toList();
+      });
+    } on PlatformException catch (e) {
+      if (mounted) {
+        setState(() {
+          error = e.message ?? 'The photos could not be opened.';
+        });
+      }
+    }
+  }
+
+  // A sent photo, fetched from the service the first time it shows.
+  Future<Uint8List> image(String chatId, String name) =>
+      images['$chatId/$name'] ??= api
+          .file('/claude/chats/$chatId/images/$name')
+          .then((f) => f.bytes)
+          .catchError((Object e) {
+            // Try again on the next build.
+            images.remove('$chatId/$name');
+            throw e;
+          });
+
   Future<void> send([String? text]) async {
     final prompt = (text ?? input.text).trim();
-    if (prompt.isEmpty || sending || running) {
+    final photos = attached;
+    if ((prompt.isEmpty && photos.isEmpty) || sending || running) {
       return;
     }
     setState(() {
@@ -274,21 +382,38 @@ class _ClaudePageState extends State<ClaudePage> {
     final mine = ++generation;
     try {
       final id = chat?['id'];
+      final body = {
+        'text': prompt,
+        if (photos.isNotEmpty)
+          'images': [for (final p in photos) base64Encode(p.bytes)],
+      };
+      final timeout = Duration(seconds: photos.isEmpty ? 20 : 120);
       final result = id == null
           ? await api.request(
               '/claude/chats',
-              body: {'cwd': cwd, 'text': prompt},
+              body: {'cwd': cwd, ...body},
+              timeout: timeout,
             )
           : await api.request(
               '/claude/chats/$id/messages',
-              body: {'text': prompt},
+              body: body,
+              timeout: timeout,
             );
       if (!mounted || mine != generation) {
         return;
       }
       input.clear();
+      final update = Map<String, dynamic>.from(result['chat'] as Map);
+      // The photos just sent are already on the phone.
+      final sent = (update['turns'] as List).last['images'] as List? ?? [];
+      for (var i = 0; i < sent.length && i < photos.length; i++) {
+        images['${update['id']}/${sent[i]['name']}'] = Future.value(
+          photos[i].bytes,
+        );
+      }
       setState(() {
-        merge(Map<String, dynamic>.from(result['chat'] as Map));
+        attached = [];
+        merge(update);
       });
       schedulePoll();
       if (id == null) {
@@ -496,9 +621,13 @@ class _ClaudePageState extends State<ClaudePage> {
       ),
       const SizedBox(height: 8),
       const Text(
-        'Claude Code on the computer that runs your service, with your settings, files and connectors. Auto mode blocks risky actions, and anything that needs approval is refused.',
+        'Claude Code on the computer that runs your service, with your settings, files and connectors. Add photos with the photo button. Auto mode blocks risky actions, and anything that needs approval is refused.',
         style: TextStyle(color: _muted, fontSize: 15),
       ),
+      if (model?.isNotEmpty == true) ...[
+        const SizedBox(height: 8),
+        Text(model!, style: const TextStyle(color: _accent, fontSize: 13)),
+      ],
       const SizedBox(height: 20),
       Card(
         child: ListTile(
@@ -529,8 +658,15 @@ class _ClaudePageState extends State<ClaudePage> {
         .map((i) => Map<String, dynamic>.from(i as Map))
         .toList();
     final status = turn['status'];
+    final chatId = chat?['id'].toString() ?? '';
     return [
-      _UserBubble(text: turn['prompt'].toString()),
+      _UserBubble(
+        text: turn['prompt'].toString(),
+        images: [
+          for (final i in turn['images'] as List? ?? const [])
+            image(chatId, (i as Map)['name'].toString()),
+        ],
+      ),
       for (final item in items)
         switch (item['kind']) {
           'text' => _ReplyBubble(text: item['text'].toString()),
@@ -589,104 +725,255 @@ class _ClaudePageState extends State<ClaudePage> {
           const SizedBox(width: 8),
         ],
       ),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                Expanded(
-                  child: current == null
-                      ? emptyState()
-                      // Reversed, so the newest message sits above the input and stays in view.
-                      : ListView(
-                          reverse: true,
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                          children: children.reversed.toList(),
-                        ),
-                ),
-                if (error != null || pollError != null)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                    child: Text(
-                      (error ?? pollError)!,
-                      style: const TextStyle(color: _blocked),
-                    ),
+      body: ContentWidth(
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
+                  Expanded(
+                    child: current == null
+                        ? emptyState()
+                        // Reversed, so the newest message sits above the input and stays in view.
+                        : ListView(
+                            reverse: true,
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                            children: children.reversed.toList(),
+                          ),
                   ),
-                SafeArea(
-                  top: false,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: input,
-                            minLines: 1,
-                            maxLines: 6,
-                            maxLength: 20000,
-                            buildCounter: (
-                              context, {
-                              required currentLength,
-                              required isFocused,
-                              maxLength,
-                            }) => null,
-                            textCapitalization: TextCapitalization.sentences,
-                            decoration: InputDecoration(
-                              hintText: current == null
-                                  ? 'Ask Claude in ${folderName(cwd)}'
-                                  : 'Message Claude',
+                  if (error != null || pollError != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                      child: Text(
+                        (error ?? pollError)!,
+                        style: const TextStyle(color: _blocked),
+                      ),
+                    ),
+                  if (attached.isNotEmpty)
+                    SizedBox(
+                      height: 76,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                        children: [
+                          for (final (i, p) in attached.indexed)
+                            _Attached(
+                              photo: p,
+                              onRemove: () => setState(() {
+                                attached = [...attached]..removeAt(i);
+                              }),
+                            ),
+                        ],
+                      ),
+                    ),
+                  SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 4, 12, 12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          IconButton(
+                            tooltip: 'Add photos',
+                            onPressed:
+                                sending ||
+                                    running ||
+                                    attached.length >= maxPhotos ||
+                                    (current == null && cwd == null)
+                                ? null
+                                : attach,
+                            icon: const Icon(
+                              Icons.add_photo_alternate_outlined,
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        running
-                            ? IconButton.filledTonal(
-                                tooltip: 'Stop Claude',
-                                onPressed: stop,
-                                icon: const Icon(Icons.stop_rounded),
-                              )
-                            : IconButton.filled(
-                                tooltip: 'Send',
-                                onPressed:
-                                    sending || (current == null && cwd == null)
-                                    ? null
-                                    : send,
-                                icon: sending
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.white,
-                                        ),
-                                      )
-                                    : const Icon(Icons.arrow_upward_rounded),
+                          Expanded(
+                            child: TextField(
+                              controller: input,
+                              minLines: 1,
+                              maxLines: 6,
+                              maxLength: 20000,
+                              buildCounter: (
+                                context, {
+                                required currentLength,
+                                required isFocused,
+                                maxLength,
+                              }) => null,
+                              textCapitalization: TextCapitalization.sentences,
+                              decoration: InputDecoration(
+                                hintText: current == null
+                                    ? 'Ask Claude in ${folderName(cwd)}'
+                                    : 'Message Claude',
                               ),
-                      ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          running
+                              ? IconButton.filledTonal(
+                                  tooltip: 'Stop Claude',
+                                  onPressed: stop,
+                                  icon: const Icon(Icons.stop_rounded),
+                                )
+                              : IconButton.filled(
+                                  tooltip: 'Send',
+                                  onPressed:
+                                      sending ||
+                                          (current == null && cwd == null)
+                                      ? null
+                                      : send,
+                                  icon: sending
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Icon(Icons.arrow_upward_rounded),
+                                ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
+      ),
     );
   }
 }
 
 class _UserBubble extends StatelessWidget {
   final String text;
-  const _UserBubble({required this.text});
+  final List<Future<Uint8List>> images;
+  const _UserBubble({required this.text, this.images = const []});
   @override
-  Widget build(BuildContext context) => Align(
-    alignment: Alignment.centerRight,
-    child: Container(
-      margin: const EdgeInsets.only(top: 16, bottom: 8, left: 48),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: _accent,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: SelectableText(text, style: const TextStyle(color: Colors.white)),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 16, bottom: 8, left: 48),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (images.isNotEmpty)
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 6,
+            runSpacing: 6,
+            children: [for (final i in images) _SentPhoto(bytes: i)],
+          ),
+        if (images.isNotEmpty && text.isNotEmpty) const SizedBox(height: 6),
+        if (text.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: _accent,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: SelectableText(
+              text,
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+      ],
     ),
+  );
+}
+
+// A photo waiting to be sent, with a button to take it out.
+class _Attached extends StatelessWidget {
+  final Photo photo;
+  final VoidCallback onRemove;
+  const _Attached({required this.photo, required this.onRemove});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(right: 8),
+    child: Stack(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.memory(
+            photo.bytes,
+            width: 64,
+            height: 64,
+            fit: BoxFit.cover,
+            semanticLabel: photo.name,
+          ),
+        ),
+        Positioned(
+          top: 0,
+          right: 0,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onRemove,
+            child: Container(
+              margin: const EdgeInsets.all(3),
+              decoration: const BoxDecoration(
+                color: Colors.black54,
+                shape: BoxShape.circle,
+              ),
+              padding: const EdgeInsets.all(2),
+              child: Icon(
+                Icons.close,
+                size: 16,
+                color: Colors.white,
+                semanticLabel: 'Remove ${photo.name}',
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// A sent photo; tap to see it full screen.
+class _SentPhoto extends StatelessWidget {
+  final Future<Uint8List> bytes;
+  const _SentPhoto({required this.bytes});
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Uint8List>(
+    future: bytes,
+    builder: (context, snapshot) {
+      final data = snapshot.data;
+      return GestureDetector(
+        onTap: data == null
+            ? null
+            : () => showDialog<void>(
+                context: context,
+                builder: (dialog) => Dialog.fullscreen(
+                  backgroundColor: Colors.black,
+                  child: Stack(
+                    children: [
+                      Center(
+                        child: InteractiveViewer(child: Image.memory(data)),
+                      ),
+                      SafeArea(
+                        child: IconButton(
+                          tooltip: 'Close',
+                          color: Colors.white,
+                          onPressed: () => Navigator.pop(dialog),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            width: 120,
+            height: 120,
+            color: _codeBackground,
+            child: data != null
+                ? Image.memory(data, fit: BoxFit.cover)
+                : Icon(
+                    snapshot.hasError
+                        ? Icons.broken_image_outlined
+                        : Icons.image_outlined,
+                    color: _muted,
+                  ),
+          ),
+        ),
+      );
+    },
   );
 }
 

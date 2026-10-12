@@ -1,9 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+
+export 'api_download_io.dart'
+    if (dart.library.js_interop) 'api_download_stub.dart';
+
+// The service did not answer: unreachable, too slow, or the proxy in front of
+// it failed. Work already started on the service carries on, so a caller can
+// retry. Prints like Exception, whose prefix the pages strip.
+class ServiceUnavailable implements Exception {
+  final String message;
+  ServiceUnavailable(this.message);
+  @override
+  String toString() => 'Exception: $message';
+}
 
 class JobsApi {
   final String baseUrl;
@@ -27,8 +39,10 @@ class JobsApi {
     String path, {
     Map<String, dynamic>? body,
     String? method,
+    // Longer for uploads, such as photos for Claude.
+    Duration timeout = const Duration(seconds: 20),
   }) async {
-    final uri = _uri(path);
+    final uri = endpointUri(path);
     final headers = {
       'Authorization': 'Bearer $token',
       'Content-Type': 'application/json',
@@ -40,9 +54,9 @@ class JobsApi {
         'PATCH' => client.patch(uri, headers: headers, body: jsonEncode(body)),
         'POST' => client.post(uri, headers: headers, body: jsonEncode(body)),
         _ => client.get(uri, headers: headers),
-      }).timeout(const Duration(seconds: 20));
+      }).timeout(timeout);
     } on TimeoutException {
-      throw Exception(
+      throw ServiceUnavailable(
         'The service at ${uri.origin} did not respond in time. Try again shortly.',
       );
     } on http.ClientException {
@@ -52,9 +66,13 @@ class JobsApi {
     try {
       result = jsonDecode(response.body) as Map<String, dynamic>;
     } on FormatException {
-      throw Exception(
-        'The service at ${uri.origin} sent an unexpected response (HTTP ${response.statusCode}).',
-      );
+      final message =
+          'The service at ${uri.origin} sent an unexpected response (HTTP ${response.statusCode}).';
+      // A 5xx page that isn't the service's JSON comes from the proxy while
+      // the service is down or restarting.
+      throw response.statusCode >= 500
+          ? ServiceUnavailable(message)
+          : Exception(message);
     }
     if (response.statusCode >= 400) {
       throw Exception(
@@ -64,61 +82,16 @@ class JobsApi {
     return result;
   }
 
-  // Streams a large file, such as an app build, to [target].
-  Future<void> download(
-    String path,
-    File target, {
-    void Function(int received, int total)? onProgress,
-  }) async {
-    final uri = _uri(path);
-    final request = http.Request('GET', uri)
-      ..headers['Authorization'] = 'Bearer $token';
-    final http.StreamedResponse response;
-    try {
-      response = await client
-          .send(request)
-          .timeout(const Duration(seconds: 20));
-    } on TimeoutException {
-      throw Exception('The service at ${uri.origin} did not respond in time.');
-    } on http.ClientException {
-      throw _unreachable(uri);
-    }
-    if (response.statusCode != 200) {
-      throw Exception('Download failed (HTTP ${response.statusCode}).');
-    }
-    final total = response.contentLength ?? 0;
-    final sink = target.openWrite();
-    var received = 0;
-    try {
-      await for (final chunk in response.stream.timeout(
-        const Duration(seconds: 30),
-      )) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress?.call(received, total);
-      }
-    } on TimeoutException {
-      throw Exception('The download stalled. Try again.');
-    } on http.ClientException {
-      throw Exception('The download was interrupted. Try again.');
-    } finally {
-      await sink.close();
-    }
-    if (total > 0 && received != total) {
-      throw Exception('The download was incomplete. Try again.');
-    }
-  }
-
   // Fetches a small file, such as the CV, with the name the service gives it.
   Future<({Uint8List bytes, String? name})> file(String path) async {
-    final uri = _uri(path);
+    final uri = endpointUri(path);
     final http.Response response;
     try {
       response = await client
           .get(uri, headers: {'Authorization': 'Bearer $token'})
           .timeout(const Duration(seconds: 30));
     } on TimeoutException {
-      throw Exception(
+      throw ServiceUnavailable(
         'The service at ${uri.origin} did not respond in time. Try again shortly.',
       );
     } on http.ClientException {
@@ -141,16 +114,16 @@ class JobsApi {
     return (bytes: response.bodyBytes, name: name);
   }
 
-  Uri _uri(String path) {
+  Uri endpointUri(String path) {
     if (!validUrl(baseUrl)) {
       throw Exception('Enter a valid service URL in Options.');
     }
     return Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}$path');
   }
 
-  Exception _unreachable(Uri uri) {
+  ServiceUnavailable _unreachable(Uri uri) {
     final local = ['127.0.0.1', 'localhost'].contains(uri.host);
-    return Exception(
+    return ServiceUnavailable(
       'Cannot reach the service at ${uri.origin}. ${local ? 'Check that scripts/serve.sh is running and, for a USB phone, that adb reverse tcp:8765 tcp:8765 is active.' : 'Check that the service is running and the URL is correct.'}',
     );
   }

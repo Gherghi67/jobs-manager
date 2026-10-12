@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -36,9 +37,15 @@ Map<String, dynamic> folders() => {
   'default': documents,
 };
 
-Widget page(http.Client client) => MaterialApp(
+// A 1×1 PNG.
+final pixel = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+);
+
+Widget page(http.Client client, {PhotoPicker pick = pickPhotos}) => MaterialApp(
   home: ClaudePage(
     api: () => JobsApi('https://mac.example.ts.net', 'token', client: client),
+    pick: pick,
   ),
 );
 
@@ -244,6 +251,140 @@ void main() {
     expect(find.text('Talk to Claude.'), findsOneWidget);
     // The remembered folder is the default for a new chat.
     expect(find.text('jobs-manager'), findsOneWidget);
+  });
+
+  testWidgets('photos go with a message and show in the chat', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final posts = <Map<String, dynamic>>[];
+    final gets = <String>[];
+    final picks = <({bool camera, int limit})>[];
+    Future<List<Photo>> pick({required bool camera, required int limit}) async {
+      picks.add((camera: camera, limit: limit));
+      return [
+        (bytes: pixel, name: 'first.png'),
+        (bytes: Uint8List.fromList([...pixel]), name: 'second.png'),
+      ];
+    }
+
+    final client = MockClient((r) async {
+      gets.add(r.url.path);
+      return switch ((r.method, r.url.path)) {
+        (_, '/claude/folders') => http.Response(
+          jsonEncode({
+            ...folders(),
+            'model': 'claude-opus-5-5',
+            'effort': 'xhigh',
+          }),
+          200,
+        ),
+        (_, '/claude/chats') => http.Response(
+          jsonEncode({
+            'chats': [chatJson(turns: [])..remove('turns')],
+          }),
+          200,
+        ),
+        (_, '/claude/chats/c1') => http.Response(
+          jsonEncode({
+            'chat': chatJson(
+              turns: [
+                {
+                  'prompt': 'Earlier',
+                  'status': 'done',
+                  'images': [
+                    {'name': '0-1.png', 'type': 'image/png'},
+                  ],
+                  'items': [],
+                },
+              ],
+            ),
+          }),
+          200,
+        ),
+        (_, '/claude/chats/c1/images/0-1.png') => http.Response.bytes(
+          pixel,
+          200,
+          headers: {'content-type': 'image/png'},
+        ),
+        ('POST', '/claude/chats/c1/messages') => () {
+          posts.add(jsonDecode(r.body) as Map<String, dynamic>);
+          return http.Response(
+            jsonEncode({
+              'chat': chatJson(
+                start: 1,
+                turns: [
+                  {
+                    'prompt': '',
+                    'status': 'done',
+                    'images': [
+                      {'name': '1-1.png', 'type': 'image/png'},
+                    ],
+                    'items': [
+                      {'kind': 'text', 'text': 'A single pixel.'},
+                    ],
+                  },
+                ],
+              ),
+            }),
+            202,
+          );
+        }(),
+        _ => http.Response(jsonEncode({'error': 'Not found'}), 404),
+      };
+    });
+    await tester.pumpWidget(page(client, pick: pick));
+    await tester.pumpAndSettle();
+    // An earlier photo comes from the service.
+    expect(gets, contains('/claude/chats/c1/images/0-1.png'));
+    expect(find.byType(Image), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Add photos'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Choose photos'));
+    await tester.pumpAndSettle();
+    expect(picks.single, (camera: false, limit: maxPhotos));
+    expect(find.bySemanticsLabel('Remove first.png'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.bySemanticsLabel('Remove second.png'),
+        matching: find.byIcon(Icons.close),
+      ),
+    );
+    await tester.pump();
+    expect(find.bySemanticsLabel('Remove second.png'), findsNothing);
+
+    // A photo on its own can be sent.
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+    expect(posts.single, {
+      'text': '',
+      'images': [base64Encode(pixel)],
+    });
+    expect(find.text('A single pixel.'), findsOneWidget);
+    expect(find.bySemanticsLabel('Remove first.png'), findsNothing);
+    // The photo just sent shows from the phone's copy.
+    expect(gets, isNot(contains('/claude/chats/c1/images/1-1.png')));
+    expect(find.byType(Image), findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a new chat names the model and effort', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final client = MockClient(
+      (r) async => switch (r.url.path) {
+        '/claude/folders' => http.Response(
+          jsonEncode({
+            ...folders(),
+            'model': 'claude-opus-5-5',
+            'effort': 'xhigh',
+          }),
+          200,
+        ),
+        _ => http.Response(jsonEncode({'chats': []}), 200),
+      },
+    );
+    await tester.pumpWidget(page(client));
+    await tester.pumpAndSettle();
+    expect(find.text('claude-opus-5-5 · xhigh effort'), findsOneWidget);
   });
 
   testWidgets('the top bar opens Claude only with a service connected', (

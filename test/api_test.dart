@@ -135,6 +135,42 @@ void main() {
       contains('unexpected response (HTTP 502)'),
     );
   });
+  test('only a missing answer means the service is unavailable', () async {
+    Future<Object> error(
+      Future<http.Response> Function(http.Request) handler,
+    ) async {
+      final api = JobsApi(
+        'https://jobs.example.com',
+        'token',
+        client: MockClient(handler),
+      );
+      try {
+        await api.request('/search/one');
+      } catch (e) {
+        return e;
+      } finally {
+        api.close();
+      }
+      fail('request should throw');
+    }
+
+    for (final handler in <Future<http.Response> Function(http.Request)>[
+      (_) => throw http.ClientException('Software caused connection abort'),
+      (_) => throw TimeoutException('slow'),
+      (_) async => http.Response('<html>Bad gateway</html>', 502),
+    ]) {
+      expect(await error(handler), isA<ServiceUnavailable>());
+    }
+    for (final response in [
+      http.Response('{"error":"Search expired. Start a new search."}', 404),
+      http.Response('<html>Not found</html>', 404),
+    ]) {
+      expect(
+        await error((_) async => response),
+        isNot(isA<ServiceUnavailable>()),
+      );
+    }
+  });
   test('reject URLs containing credentials or query strings', () {
     expect(JobsApi.validUrl('https://user:password@example.com'), false);
     expect(JobsApi.validUrl('https://example.com?key=secret'), false);

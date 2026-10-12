@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -16,10 +17,11 @@ import threading
 import time
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT.parent / 'artifacts'
+WEB_DIR = ROOT.parent / 'build' / 'web'
 CV_DIR = Path(os.environ.get('JOBS_CV_DIR') or ROOT.parent / 'cv')
 APPLIED_FILE = Path(os.environ.get('JOBS_APPLIED_FILE') or ROOT / 'applied.json')
 sys.path.insert(0, str(ROOT / 'vendor'))
@@ -28,11 +30,15 @@ import remote_search as remote
 import ai_pick as ai
 import claude_chat
 import gmail_sync
+import linkedin
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
-DEFAULTS = dict(preset='broad', adzuna=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
+DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
                 keywords='', remote_only=True, eligibility='romania', contract_only=False,
-                prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal')
+                prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal',
+                dismissed=[])
+# The app sends its most recent dismissals, ~27 bytes each in JSON.
+MAX_DISMISSED = 2000
 
 
 def config(name):
@@ -49,14 +55,14 @@ def validate_options(value):
     ai.accounts.validate(o['ai_engine'], o['ai_subscription'])
     if o['preset'] not in ('backend', 'broad', 'gaming'):
         raise ValueError('Unknown preset.')
-    for key in ('adzuna', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
+    for key in ('adzuna', 'linkedin', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
         if type(o[key]) is not bool:
             raise ValueError(f'{key} must be true or false.')
     if not isinstance(o['boards'], list) or any(x not in PUBLIC_SOURCES for x in o['boards']):
         raise ValueError('Unknown remote board.')
     if not isinstance(o['countries'], list) or not 1 <= len(o['countries']) <= 7 or any(x not in ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr') for x in o['countries']):
         raise ValueError('Choose 1–7 supported Adzuna countries.')
-    if not o['adzuna'] and not o['boards']:
+    if not o['adzuna'] and not (o['linkedin'] and linkedin.enabled()) and not o['boards']:
         raise ValueError('Enable at least one source.')
     if o['eligibility'] not in ('romania', 'romania_unclear', 'all'):
         raise ValueError('Unknown eligibility option.')
@@ -64,6 +70,9 @@ def validate_options(value):
         raise ValueError('Age must be 1–90 days.')
     if not isinstance(o['keywords'], str) or len(o['keywords']) > 200:
         raise ValueError('Keywords must be at most 200 characters.')
+    if (not isinstance(o['dismissed'], list) or len(o['dismissed']) > MAX_DISMISSED
+            or any(not isinstance(x, str) or not 0 < len(x) <= 64 for x in o['dismissed'])):
+        raise ValueError(f'Dismissed roles must be at most {MAX_DISMISSED} listing ids.')
     o['boards'] = list(dict.fromkeys(o['boards']))
     o['countries'] = list(dict.fromkeys(o['countries']))
     return o
@@ -439,6 +448,8 @@ class Engine:
 
     def start(self, options):
         o = validate_options(options)
+        # Kept out of the run state, which every poll sends back to the app.
+        dismissed = set(o.pop('dismissed'))
         with self.lock:
             for key, run in self.runs.items():
                 if run['status'] == 'running':
@@ -447,7 +458,7 @@ class Engine:
                     raise RuntimeError('A search is already running. Wait for it to finish.')
             run_id = secrets.token_hex(12)
             self.runs = {run_id: dict(status='running', options=o, jobs=[], sources=[], current='Starting search', fetched=0, applied_hidden=0)}
-        threading.Thread(target=self.run, args=(run_id, o), daemon=True).start()
+        threading.Thread(target=self.run, args=(run_id, o, dismissed), daemon=True).start()
         return run_id
 
     def get(self, key):
@@ -495,14 +506,17 @@ class Engine:
             raise ValueError('; '.join(failures))
         return rows, failures
 
-    def run(self, key, o):
-        raw, statuses, jobs = [], [], []
+    def run(self, key, o, dismissed=frozenset()):
+        raw, statuses, jobs, set_aside = [], [], [], []
         try:
             c = search_config(o)
             plans = [('adzuna', None)] if o['adzuna'] else []
             plans += [(name, c.get('sources', {}).get(name, config('remote_config.json')['sources'].get(name, {}))) for name in o['boards']]
             if o['preset'] == 'gaming' and o['boards']:
                 plans += [(name, opts) for name, opts in c['sources'].items() if name not in PUBLIC_SOURCES]
+            # Last: the browser agent takes the longest, so the other sources show first.
+            if o['linkedin'] and linkedin.enabled():
+                plans.append(('linkedin', None))
             self.update(key, total=len(plans))
             for name, options in plans:
                 self.update(key, current=f'Fetching {name}', source=name)
@@ -510,6 +524,9 @@ class Engine:
                     if name == 'adzuna':
                         cache_key = json.dumps(['adzuna', o['preset'], o['countries'], o['keywords'], o['max_age_days']], sort_keys=True)
                         (rows, warnings), cached = self.cached(cache_key, lambda: self.adzuna(o))
+                    elif name == 'linkedin':
+                        cache_key = json.dumps(['linkedin', linkedin.request(o)], sort_keys=True)
+                        (rows, warnings), cached = self.cached(cache_key, lambda: linkedin.fetch(o, remote.job))
                     else:
                         options = copy.deepcopy(options)
                         if name == 'himalayas':
@@ -530,11 +547,15 @@ class Engine:
                     statuses.append(dict(name=name, status='partial' if warnings else 'ok', count=len(rows), cached=cached, message=str(warnings) if warnings else ''))
                 except Exception as exc:
                     # Never expose upstream URLs that could contain API keys.
-                    message = str(exc) if name == 'adzuna' and isinstance(exc, ValueError) else f'{type(exc).__name__}: source unavailable; other sources continue.'
+                    own = (name == 'adzuna' and isinstance(exc, ValueError)) or isinstance(exc, linkedin.LinkedInError)
+                    message = str(exc) if own else f'{type(exc).__name__}: source unavailable; other sources continue.'
                     statuses.append(dict(name=name, status='error', count=0, cached=False, message=message))
                 # Applied roles go before Claude's step, so they are never ranked or shown again.
                 jobs, hidden = self.applied.exclude(rank(raw, o))
-                self.update(key, jobs=jobs, sources=copy.deepcopy(statuses), fetched=len(raw), applied_hidden=hidden)
+                # Dismissed roles still come back for the Dismissed tab, but last and outside the AI step,
+                # so they never take a shortlist slot from a role the user hasn't seen.
+                jobs, set_aside = [j for j in jobs if j['id'] not in dismissed], [j for j in jobs if j['id'] in dismissed]
+                self.update(key, jobs=jobs + set_aside, sources=copy.deepcopy(statuses), fetched=len(raw), applied_hidden=hidden)
             if o['ai_pick'] and jobs:
                 count = min(len(jobs), ai.LIMIT)
                 label = f'{o["ai_engine"].title()} · {o["ai_subscription"].title()}'
@@ -549,7 +570,7 @@ class Engine:
                 except Exception as exc:
                     status = dict(status='error', engine=o['ai_engine'], subscription=o['ai_subscription'],
                                   message=f'{type(exc).__name__}: {label} ranking failed; keyword ranking shown.')
-                self.update(key, jobs=jobs, ai=status)
+                self.update(key, jobs=jobs + set_aside, ai=status)
             self.update(key, status='complete', current='Search complete', updated_at=dt.datetime.now(dt.timezone.utc).isoformat())
         except Exception:
             self.update(key, status='error', current='Search failed. Please retry.')
@@ -616,13 +637,40 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(401, {'error': 'Check your service access token.'})
             return False
         return True
+    def web_file(self):
+        """Only the compiled browser shell is public; API routes still need a token."""
+        path = unquote(urlparse(self.path).path)
+        parts = path.strip('/').split('/')
+        entries = {'index.html', 'flutter_bootstrap.js', 'flutter.js',
+                   'main.dart.js', 'manifest.json', 'version.json', 'favicon.svg'}
+        if path != '/' and parts[0] not in entries | {'assets', 'canvaskit', 'icons'}:
+            return False
+        base = WEB_DIR.resolve()
+        target = (base / ('index.html' if path == '/' else path.lstrip('/'))).resolve()
+        if any(part.startswith('.') for part in parts) or not target.is_relative_to(base) or not target.is_file():
+            self.respond(404, {'error': 'Website file not found. Build it with scripts/build_web.sh.'})
+            return True
+        content_type = {'.js': 'text/javascript', '.wasm': 'application/wasm'}.get(
+            target.suffix, mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
+        self.send_file(target, content_type, 'Website file not found.')
+        return True
+
+    def end_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Frame-Options', 'DENY')
+        super().end_headers()
+
     def do_GET(self):
+        if self.web_file():
+            return
         if not self.authorized():
             return
         path = urlparse(self.path).path
         if path == '/health':
             self.respond(200, {'status': 'ok', 'adzuna_configured': bool(os.environ.get('ADZUNA_APP_ID') and os.environ.get('ADZUNA_APP_KEY')),
-                               'claude_available': ai.available(), 'claude_chat': claude_chat.enabled()})
+                               'claude_available': ai.available(), 'claude_chat': claude_chat.enabled(),
+                               'linkedin_available': linkedin.enabled()})
         elif path == '/app':
             self.respond(200, app_release())
         elif path == '/ranking/accounts':
@@ -682,8 +730,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(404, {'error': 'Not found'})
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            # A job carries its description, so it may be larger than search options.
-            if not 0 < size <= (8192 if path == '/search' else 65536):
+            # A job carries its description; search options carry up to MAX_DISMISSED listing ids.
+            if not 0 < size <= 65536:
                 raise ValueError('Invalid request size.')
             self.connection.settimeout(10)
             body = json.loads(self.rfile.read(size))
@@ -750,9 +798,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if method == 'GET' and parts == ['folders']:
                 rows = claude_chat.folders()
-                return self.respond(200, {'folders': rows, 'default': rows[0]['path'] if rows else ''})
+                return self.respond(200, {'folders': rows, 'default': rows[0]['path'] if rows else '',
+                                          'model': claude_chat.MODEL, 'effort': claude_chat.EFFORT})
             if method == 'GET' and parts == ['chats']:
                 return self.respond(200, {'chats': self.chats.list()})
+            if method == 'GET' and len(parts) == 4 and parts[0] == 'chats' and parts[2] == 'images':
+                image = self.chats.image(chat_id, parts[3])
+                if not image:
+                    return self.respond(404, {'error': 'This image is no longer on the service.'})
+                kind = next(k for k, ext in claude_chat.IMAGE_TYPES.items() if image.suffix == '.' + ext)
+                return self.send_file(image, kind, 'This image is no longer on the service.')
             if method == 'GET' and len(parts) == 2 and parts[0] == 'chats':
                 start = parse_qs(urlparse(self.path).query).get('from', ['0'])[0]
                 chat = self.chats.get(chat_id, int(start) if start.isdigit() else 0)
@@ -760,10 +815,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == 'DELETE' and len(parts) == 2 and parts[0] == 'chats':
                 return self.respond(200, {'removed': self.chats.remove(chat_id)})
             if method == 'POST' and parts == ['chats']:
-                body = self.read_json(131072)
-                return self.respond(202, {'chat': self.chats.create(body.get('cwd'), body.get('text'))})
+                body = self.read_json(claude_chat.REQUEST_BYTES)
+                return self.respond(202, {'chat': self.chats.create(body.get('cwd'), body.get('text'), body.get('images'))})
             if method == 'POST' and len(parts) == 3 and parts[0] == 'chats' and parts[2] == 'messages':
-                chat = self.chats.send(chat_id, self.read_json(131072).get('text'))
+                body = self.read_json(claude_chat.REQUEST_BYTES)
+                chat = self.chats.send(chat_id, body.get('text'), body.get('images'))
                 return self.respond(202 if chat else 404, {'chat': chat} if chat else missing)
             if method == 'POST' and len(parts) == 3 and parts[0] == 'chats' and parts[2] == 'stop':
                 chat = self.chats.stop(chat_id)

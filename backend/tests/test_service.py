@@ -11,6 +11,8 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Searches here must never start the real LinkedIn browser agent.
+os.environ['JOBS_LINKEDIN'] = 'off'
 import service as s
 
 
@@ -58,7 +60,8 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(s.rank(rows, self.options), [])
 
     def test_bad_options_rejected(self):
-        for options in [{'boards': ['evil']}, {'adzuna': 'yes'}, {'max_age_days': True}, {'countries': []}, {'keywords': 1}, {'preset': 'bad'}, {'unknown': 1}]:
+        for options in [{'boards': ['evil']}, {'adzuna': 'yes'}, {'max_age_days': True}, {'countries': []}, {'keywords': 1}, {'preset': 'bad'}, {'unknown': 1},
+                        {'dismissed': 'a'}, {'dismissed': [1]}, {'dismissed': ['']}, {'dismissed': ['x' * 65]}, {'dismissed': ['a'] * (s.MAX_DISMISSED + 1)}]:
             with self.subTest(options=options), self.assertRaises(ValueError):
                 s.validate_options(options)
 
@@ -264,6 +267,32 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result['jobs'][1]['applied_badge']['company'], 'Studio')
         self.assertEqual(result['applied_hidden'], 0)
 
+    def test_dismissed_roles_skip_claude_and_go_last(self):
+        engine = s.Engine(self.store())
+        dismissed = s.rank([job()], s.validate_options({}))[0]['id']
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
+        engine.runs['x'] = {}
+        seen = []
+        def pick(jobs, o, cache):
+            seen.extend(j['company'] for j in jobs)
+            return jobs, dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
+        rows = [job(), job(company='Fresh', url='https://example.com/fresh')]
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: rows}), patch.object(s.ai, 'pick', pick):
+            engine.run('x', o, {dismissed})
+        result = engine.get('x')
+        self.assertEqual(seen, ['Fresh'])
+        # Still returned, so the Dismissed tab can list and restore it.
+        self.assertEqual([j['company'] for j in result['jobs']], ['Fresh', 'Studio'])
+        self.assertEqual(result['applied_hidden'], 0)
+
+    def test_dismissed_roles_stay_out_of_the_run_state(self):
+        engine = s.Engine(self.store())
+        options = {'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, 'dismissed': ['a' * 24]}
+        with patch.object(s.threading, 'Thread') as thread:
+            key = engine.start(options)
+        self.assertEqual(thread.call_args.kwargs['args'][2], {'a' * 24})
+        self.assertNotIn('dismissed', engine.get(key)['options'])
+
     def test_partial_failure_keeps_working_source(self):
         engine = s.Engine(self.store())
         o = s.validate_options({'adzuna': False, 'boards': ['remotive', 'remoteok'], 'ai_pick': False})
@@ -363,6 +392,12 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(e.exception.code, 401)
             catalog.assert_not_called()
             self.assertEqual(self.call('GET', '/ranking/accounts'), {'accounts': rows})
+
+    def test_search_accepts_a_full_dismissed_list(self):
+        body = dict(s.DEFAULTS, dismissed=[f'{i:024x}' for i in range(s.MAX_DISMISSED)])
+        with patch.object(s.Handler.engine, 'start', return_value='run') as start:
+            self.assertEqual(self.call('POST', '/search', body), {'id': 'run'})
+        self.assertEqual(len(start.call_args.args[0]['dismissed']), s.MAX_DISMISSED)
 
     def test_health_and_invalid_request(self):
         headers = {'Authorization': 'Bearer ' + self.token}

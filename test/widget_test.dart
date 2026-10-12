@@ -120,7 +120,10 @@ void main() {
     });
     await tester.pumpWidget(const JobsApp());
     await tester.pumpAndSettle();
-    expect(find.textContaining('Adzuna + 1 remote board ·'), findsOneWidget);
+    expect(
+      find.textContaining('Adzuna + LinkedIn + 1 remote board ·'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('2/2 sources responded'));
     await tester.pumpAndSettle();
     expect(find.text('Adzuna'), findsOneWidget);

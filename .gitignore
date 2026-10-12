@@ -52,6 +52,7 @@ backend/.access-token
 backend/profile.md
 backend/applied.json*
 backend/chats.json*
+backend/chat-images/
 cv/
 __pycache__/
 *.pyc

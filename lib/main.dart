@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
+import 'adaptive.dart';
+import 'install_update_stub.dart' if (dart.library.io) 'install_update_io.dart';
 import 'applications.dart';
 import 'claude_chat.dart';
 import 'downloads.dart';
@@ -74,7 +77,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   Set<String> dismissed = {}, applying = {};
   List<dynamic> sources = [];
   Map<String, dynamic>? aiStatus;
-  String baseUrl = 'http://127.0.0.1:8765',
+  String baseUrl = kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765',
       token = '',
       status = '',
       updated = '',
@@ -90,6 +93,10 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   DateTime? appliedFetchedAt, appliedAttemptAt;
   bool appliedFetching = false;
   Map<String, dynamic> gmailSync = {};
+  // The search the service is running for this app, kept on the phone until
+  // its results arrive so a backgrounded or restarted app collects them.
+  String? searchRun;
+  Completer<void>? backOnScreen;
   // One list serves every tab; a new tab starts at its top.
   final listScroll = ScrollController();
 
@@ -108,6 +115,13 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && !loading) {
+      // Wakes a search that waited out the background, or picks up one that
+      // lost its connection.
+      backOnScreen?.complete();
+      backOnScreen = null;
+      if (!busy && searchRun != null) {
+        unawaited(collect(searchRun));
+      }
       unawaited(refreshAppliedIfDue());
     }
   }
@@ -124,6 +138,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   void dispose() {
     generation++;
     WidgetsBinding.instance.removeObserver(this);
+    backOnScreen?.complete();
     appliedTimer?.cancel();
     activeApi?.close();
     listScroll.dispose();
@@ -170,7 +185,11 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       baseUrl = p.getString('url') ?? baseUrl;
       token = p.getString('token') ?? '';
       updated = p.getString('updated') ?? '';
+      searchRun = p.getString('search_run');
     });
+    if (searchRun != null) {
+      unawaited(collect(searchRun));
+    }
     unawaited(refreshAppliedIfDue());
   }
 
@@ -204,12 +223,33 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     await p.setString('token', token);
   }
 
-  Future<void> search() async {
+  Future<void> rememberRun(String? id) async {
+    searchRun = id;
+    final p = prefs;
+    if (p != null) {
+      await (id == null
+          ? p.remove('search_run')
+          : p.setString('search_run', id));
+    }
+  }
+
+  bool offScreen() => const [
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+    AppLifecycleState.detached,
+  ].contains(WidgetsBinding.instance.lifecycleState);
+
+  Future<void> search() => collect(null);
+
+  // Starts a search, or with [id] follows one the service is already running.
+  Future<void> collect(String? id) async {
     if (busy || loading) {
       return;
     }
     if (token.isEmpty) {
-      await editOptions();
+      if (id == null) {
+        await editOptions();
+      }
       return;
     }
     final run = ++generation;
@@ -218,13 +258,46 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     setState(() {
       busy = true;
       error = null;
-      status = 'Connecting to your sources…';
+      status = id == null
+          ? 'Connecting to your sources…'
+          : 'Checking on your search…';
     });
     try {
-      final start = await api.request('/search', body: options);
+      if (id == null) {
+        // The service keeps dismissed roles out of the AI shortlist and lists them last.
+        final start = await api.request(
+          '/search',
+          body: {...options, 'dismissed': recentDismissed(dismissed)},
+        );
+        id = start['id'] as String;
+        await rememberRun(id);
+      }
       final deadline = DateTime.now().add(const Duration(minutes: 20));
+      var misses = 0;
       while (mounted && run == generation) {
-        final result = await api.request('/search/${start['id']}');
+        final Map<String, dynamic> result;
+        try {
+          result = await api.request('/search/$id');
+          misses = 0;
+        } on ServiceUnavailable {
+          if (!mounted || run != generation) {
+            return;
+          }
+          // In the background Android pauses the app or cuts its network
+          // while the service keeps searching, so wait to be back on screen.
+          if (offScreen()) {
+            await (backOnScreen ??= Completer<void>()).future;
+            continue;
+          }
+          // On screen, give up after a few misses; the next resume or launch
+          // picks the search up again.
+          if (++misses >= 3) {
+            rethrow;
+          }
+          setState(() => status = 'Reconnecting to the service…');
+          await Future<void>.delayed(const Duration(seconds: 2));
+          continue;
+        }
         if (!mounted || run != generation) {
           return;
         }
@@ -257,6 +330,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
             appliedHidden = (result['applied_hidden'] as num?)?.toInt() ?? 0;
             cached = false;
           });
+          await rememberRun(null);
           await persist();
           break;
         }
@@ -268,10 +342,16 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
         await Future<void>.delayed(const Duration(seconds: 2));
       }
     } catch (e) {
+      // Only a lost connection leaves the run worth collecting later. A
+      // failed start keeps any earlier run the app still has to collect.
+      final lost = e is ServiceUnavailable;
+      if (!lost && id != null) {
+        await rememberRun(null);
+      }
       if (mounted && run == generation) {
         setState(() {
           error =
-              'Could not finish search. ${e.toString().replaceFirst('Exception: ', '')}';
+              'Could not finish search. ${e.toString().replaceFirst('Exception: ', '')}${lost && id != null ? ' If the service is still up, the search carries on there and its results load when you come back to the app.' : ''}';
         });
       }
     } finally {
@@ -572,11 +652,15 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       final cv = await api.file('/cv');
       final saved = await Downloads.save(cv.name ?? 'CV.pdf', cv.bytes);
       notify(
-        'Saved ${saved.name} to Downloads.',
-        action: SnackBarAction(
-          label: 'Open',
-          onPressed: () => unawaited(openCv(saved.uri)),
-        ),
+        kIsWeb
+            ? 'Download started: ${saved.name}'
+            : 'Saved ${saved.name} to Downloads.',
+        action: kIsWeb
+            ? null
+            : SnackBarAction(
+                label: 'Open',
+                onPressed: () => unawaited(openCv(saved.uri)),
+              ),
       );
     } on MissingPluginException {
       notify('Saving files works in the Android app only.');
@@ -737,6 +821,12 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     );
   }
 
+  void selectTab(int value) {
+    setState(() => tab = value);
+    if (listScroll.hasClients) listScroll.jumpTo(0);
+    if (value == 2) unawaited(refreshAppliedIfDue());
+  }
+
   @override
   Widget build(BuildContext context) {
     final pool = switch (tab) {
@@ -826,6 +916,12 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
           ],
         ),
         actions: [
+          if (tab == 2)
+            IconButton(
+              tooltip: 'Refresh applications',
+              onPressed: loading || appliedFetching ? null : syncApplied,
+              icon: const Icon(Icons.refresh),
+            ),
           IconButton(
             tooltip: 'Talk to Claude',
             onPressed: loading ? null : openClaude,
@@ -844,585 +940,588 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
           const SizedBox(width: 8),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (v) {
-          setState(() {
-            tab = v;
-          });
-          if (listScroll.hasClients) {
-            listScroll.jumpTo(0);
-          }
-          if (v == 2) {
-            unawaited(refreshAppliedIfDue());
-          }
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.explore_outlined),
-            selectedIcon: Icon(Icons.explore),
-            label: 'Discover',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.bookmark_border),
-            selectedIcon: Icon(Icons.bookmark),
-            label: 'Saved',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.check_circle_outline),
-            selectedIcon: Icon(Icons.check_circle),
-            label: 'Applied',
-          ),
-          NavigationDestination(icon: Icon(Icons.history), label: 'Dismissed'),
-        ],
-      ),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: tab == 2 ? syncApplied : search,
-              child: ListView(
-                controller: listScroll,
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-                children: [
-                  Text(
-                    switch (tab) {
-                      0 => 'Your next chapter.',
-                      1 => 'Worth a closer look.',
-                      2 => 'Already applied.',
-                      _ => 'Off your shortlist.',
-                    },
-                    style: const TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -1.3,
-                      color: ink,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    switch (tab) {
-                      0 => 'Good work, on your terms.',
-                      1 => 'Your saved roles stay here, even offline.',
-                      2 =>
-                        'Kept on your service, so searches skip these roles.',
-                      _ => 'Restore a role whenever you change your mind.',
-                    },
-                    style: const TextStyle(
-                      color: Color(0xFF63716D),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  if (tab == 0) ...[
-                    Container(
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
+      bottomNavigationBar: MediaQuery.sizeOf(context).width >= 1000
+          ? null
+          : NavigationBar(
+              selectedIndex: tab,
+              onDestinationSelected: selectTab,
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.explore_outlined),
+                  selectedIcon: Icon(Icons.explore),
+                  label: 'Discover',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.bookmark_border),
+                  selectedIcon: Icon(Icons.bookmark),
+                  label: 'Saved',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.check_circle_outline),
+                  selectedIcon: Icon(Icons.check_circle),
+                  label: 'Applied',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.history),
+                  label: 'Dismissed',
+                ),
+              ],
+            ),
+      body: WorkspaceBody(
+        selected: tab,
+        onSelect: selectTab,
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: tab == 2 ? syncApplied : search,
+                child: ListView(
+                  controller: listScroll,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+                  children: [
+                    Text(
+                      switch (tab) {
+                        0 => 'Your next chapter.',
+                        1 => 'Worth a closer look.',
+                        2 => 'Already applied.',
+                        _ => 'Off your shortlist.',
+                      },
+                      style: const TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -1.3,
                         color: ink,
-                        borderRadius: BorderRadius.circular(22),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'YOUR SEARCH',
-                            style: TextStyle(
-                              color: Color(0xFFAFDDBB),
-                              letterSpacing: 1.8,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            options['preset'] == 'gaming'
-                                ? 'Gaming & game backends'
-                                : options['preset'] == 'backend'
-                                ? 'Node.js · TypeScript · Backend'
-                                : 'Backend · AI · Python · Go',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            '${options['remote_only'] ? 'Fully remote' : 'All work styles'}  /  ${options['eligibility'] == 'all'
-                                ? 'All locations'
-                                : options['eligibility'] == 'romania'
-                                ? 'Romania eligible'
-                                : 'Romania + unclear'}',
-                            style: const TextStyle(color: Color(0xFFCEDBD4)),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            '${options['adzuna'] ? 'Adzuna + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · ${engineLabel(options['ai_engine'])} picks' : ''}',
-                            style: const TextStyle(color: Color(0xFFCEDBD4)),
-                          ),
-                          const SizedBox(height: 20),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.icon(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: const Color(0xFFCEF09D),
-                                foregroundColor: ink,
-                              ),
-                              onPressed: busy ? null : search,
-                              icon: Icon(
-                                token.isEmpty ? Icons.link : Icons.refresh,
-                              ),
-                              label: Text(
-                                busy
-                                    ? 'Searching your sources…'
-                                    : token.isEmpty
-                                    ? 'Connect your job service'
-                                    : 'Find opportunities',
-                              ),
-                            ),
-                          ),
-                        ],
                       ),
                     ),
-                    if (busy) ...[
-                      const SizedBox(height: 16),
-                      const LinearProgressIndicator(),
-                      const SizedBox(height: 8),
-                      Text(status),
-                    ],
-                    if (error != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16),
-                        child: Text(
-                          error!,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
-                        ),
+                    const SizedBox(height: 8),
+                    Text(
+                      switch (tab) {
+                        0 => 'Good work, on your terms.',
+                        1 => 'Your saved roles stay here, even offline.',
+                        2 =>
+                          'Kept on your service, so searches skip these roles.',
+                        _ => 'Restore a role whenever you change your mind.',
+                      },
+                      style: const TextStyle(
+                        color: Color(0xFF63716D),
+                        fontSize: 15,
                       ),
-                    if (sources.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: ExpansionTile(
-                          tilePadding: EdgeInsets.zero,
-                          title: Text(
-                            busy
-                                ? '${sources.length}/${sourceCount()} sources checked'
-                                : '${sources.where((s) => s['status'] != 'error').length}/${sourceCount()} sources responded',
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                          children: sources
-                              .map(
-                                (s) => ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Icon(
-                                    s['status'] == 'ok'
-                                        ? Icons.check_circle_outline
-                                        : Icons.info_outline,
-                                    color: s['status'] == 'ok'
-                                        ? accent
-                                        : Colors.orange.shade800,
-                                  ),
-                                  title: Text(sourceName(s['name'])),
-                                  subtitle: Text(
-                                    s['status'] == 'error' ||
-                                            s['status'] == 'partial'
-                                        ? s['message'].toString()
-                                        : '${plural(s['count'] as int, 'listing')}${s['cached'] == true ? ' · Cached for up to 1 hour' : ''}',
-                                  ),
-                                ),
-                              )
-                              .toList(),
+                    ),
+                    const SizedBox(height: 24),
+                    if (tab == 0) ...[
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: ink,
+                          borderRadius: BorderRadius.circular(22),
                         ),
-                      ),
-                    if (aiStatus != null && !busy)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Row(
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Icon(
-                              Icons.auto_awesome_outlined,
-                              size: 18,
-                              color: aiStatus!['status'] == 'error'
-                                  ? Colors.orange.shade800
-                                  : accent,
+                            const Text(
+                              'YOUR SEARCH',
+                              style: TextStyle(
+                                color: Color(0xFFAFDDBB),
+                                letterSpacing: 1.8,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                aiSummary(aiStatus!),
-                                style: const TextStyle(fontSize: 13),
+                            const SizedBox(height: 12),
+                            Text(
+                              options['preset'] == 'gaming'
+                                  ? 'Gaming & game backends'
+                                  : options['preset'] == 'backend'
+                                  ? 'Node.js · TypeScript · Backend'
+                                  : 'Backend · AI · Python · Go',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              '${options['remote_only'] ? 'Fully remote' : 'All work styles'}  /  ${options['eligibility'] == 'all'
+                                  ? 'All locations'
+                                  : options['eligibility'] == 'romania'
+                                  ? 'Romania eligible'
+                                  : 'Romania + unclear'}',
+                              style: const TextStyle(color: Color(0xFFCEDBD4)),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              '${options['adzuna'] ? 'Adzuna + ' : ''}${options['linkedin'] == true ? 'LinkedIn + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · ${engineLabel(options['ai_engine'])} picks' : ''}',
+                              style: const TextStyle(color: Color(0xFFCEDBD4)),
+                            ),
+                            const SizedBox(height: 20),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.icon(
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFCEF09D),
+                                  foregroundColor: ink,
+                                ),
+                                onPressed: busy ? null : search,
+                                icon: Icon(
+                                  token.isEmpty ? Icons.link : Icons.refresh,
+                                ),
+                                label: Text(
+                                  busy
+                                      ? 'Searching your sources…'
+                                      : token.isEmpty
+                                      ? 'Connect your job service'
+                                      : 'Find opportunities',
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
-                    const SizedBox(height: 20),
-                  ],
-                  if (tab == 2 && appliedNote != null)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(
-                        appliedNote!,
-                        style: TextStyle(color: Colors.orange.shade900),
-                      ),
-                    ),
-                  if (tab == 2)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          syncMark(
-                            syncHealth(
-                              gmailSync,
-                              appliedFetchedAt,
-                              fetchFailed: appliedNote != null,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              gmailSyncLabel(gmailSync, appliedFetchedAt),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  if (tab == 2 && applied.isNotEmpty) ...[
-                    StatsPanel(
-                      stats: ApplicationStats.of(
-                        applied.values.cast<Map>(),
-                        DateTime.now(),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                  TextField(
-                    onChanged: (v) => setState(() {
-                      filter = v;
-                    }),
-                    decoration: const InputDecoration(
-                      hintText: 'Search these results',
-                      prefixIcon: Icon(Icons.search),
-                    ),
-                  ),
-                  if (sourceKeys.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: sourceFilter,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Returned by',
-                        prefixIcon: Icon(Icons.filter_alt_outlined),
-                      ),
-                      items: [
-                        DropdownMenuItem(
-                          value: '',
-                          child: Text(
-                            'All sources · ${plural(matching.length, 'role')}',
-                          ),
-                        ),
-                        for (final s in sourceKeys)
-                          DropdownMenuItem(
-                            value: s,
-                            child: Text(
-                              '${sourceName(s)} · ${plural(perSource[s] ?? 0, 'role')}',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
+                      if (busy) ...[
+                        const SizedBox(height: 16),
+                        const LinearProgressIndicator(),
+                        const SizedBox(height: 8),
+                        Text(status),
                       ],
+                      if (error != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: Text(
+                            error!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
+                      if (sources.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: ExpansionTile(
+                            tilePadding: EdgeInsets.zero,
+                            title: Text(
+                              busy
+                                  ? '${sources.length}/${sourceCount()} sources checked'
+                                  : '${sources.where((s) => s['status'] != 'error').length}/${sourceCount()} sources responded',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                            children: sources
+                                .map(
+                                  (s) => ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Icon(
+                                      s['status'] == 'ok'
+                                          ? Icons.check_circle_outline
+                                          : Icons.info_outline,
+                                      color: s['status'] == 'ok'
+                                          ? accent
+                                          : Colors.orange.shade800,
+                                    ),
+                                    title: Text(sourceName(s['name'])),
+                                    subtitle: Text(
+                                      s['status'] == 'error' ||
+                                              s['status'] == 'partial'
+                                          ? s['message'].toString()
+                                          : '${plural(s['count'] as int, 'listing')}${s['cached'] == true ? ' · Cached for up to 1 hour' : ''}',
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      if (aiStatus != null && !busy)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.auto_awesome_outlined,
+                                size: 18,
+                                color: aiStatus!['status'] == 'error'
+                                    ? Colors.orange.shade800
+                                    : accent,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  aiSummary(aiStatus!),
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      const SizedBox(height: 20),
+                    ],
+                    if (tab == 2 && appliedNote != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Text(
+                          appliedNote!,
+                          style: TextStyle(color: Colors.orange.shade900),
+                        ),
+                      ),
+                    if (tab == 2)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            syncMark(
+                              syncHealth(
+                                gmailSync,
+                                appliedFetchedAt,
+                                fetchFailed: appliedNote != null,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                gmailSyncLabel(gmailSync, appliedFetchedAt),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (tab == 2 && applied.isNotEmpty) ...[
+                      StatsPanel(
+                        stats: ApplicationStats.of(
+                          applied.values.cast<Map>(),
+                          DateTime.now(),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                    TextField(
                       onChanged: (v) => setState(() {
-                        sourceFilter = v ?? '';
+                        filter = v;
                       }),
+                      decoration: const InputDecoration(
+                        hintText: 'Search these results',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                    ),
+                    if (sourceKeys.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<String>(
+                        initialValue: sourceFilter,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Returned by',
+                          prefixIcon: Icon(Icons.filter_alt_outlined),
+                        ),
+                        items: [
+                          DropdownMenuItem(
+                            value: '',
+                            child: Text(
+                              'All sources · ${plural(matching.length, 'role')}',
+                            ),
+                          ),
+                          for (final s in sourceKeys)
+                            DropdownMenuItem(
+                              value: s,
+                              child: Text(
+                                '${sourceName(s)} · ${plural(perSource[s] ?? 0, 'role')}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (v) => setState(() {
+                          sourceFilter = v ?? '';
+                        }),
+                      ),
+                    ],
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        Text(switch (tab) {
+                          1 => plural(visible.length, 'saved role'),
+                          2 => plural(visible.length, 'applied role'),
+                          3 => plural(visible.length, 'dismissed role'),
+                          _ => plural(
+                            visible.length,
+                            'opportunity',
+                            'opportunities',
+                          ),
+                        }, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        if (cached && tab != 2)
+                          const Text('Cached', style: TextStyle(color: accent)),
+                      ],
+                    ),
+                    if (tab == 0 && appliedHidden > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Left out ${plural(appliedHidden, 'role')} you already applied to.',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ),
+                    if (updated.isNotEmpty && tab != 2)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Last search: ${DateTime.tryParse(updated)?.toLocal().toString().split('.').first ?? updated}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    if (visible.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 32),
+                        child: Column(
+                          children: [
+                            Icon(
+                              switch (tab) {
+                                1 => Icons.bookmarks_outlined,
+                                2 => Icons.check_circle_outline,
+                                _ => Icons.travel_explore,
+                              },
+                              size: 48,
+                              color: accent,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              switch (tab) {
+                                1 => 'Keep the roles that catch your eye.',
+                                2 => 'No applications marked yet.',
+                                3 => 'Nothing dismissed.',
+                                _ =>
+                                  jobs.isEmpty && updated.isEmpty
+                                      ? 'A fresh start for your job search.'
+                                      : 'No roles match this view.',
+                              },
+                              style: const TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(switch (tab) {
+                              0 => 'Choose your options, then fetch from your sources.',
+                              2 => 'Mark a role as applied and future searches will leave it out.',
+                              _ =>
+                                'Your choices are stored only on this device.',
+                            }, textAlign: TextAlign.center),
+                          ],
+                        ),
+                      ),
+                    ...visible.map(
+                      (j) => Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: Card(
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(22),
+                            onTap: tab == 2 && applied.containsKey(j.id)
+                                ? () => openApplication(j)
+                                : j.companyWide
+                                ? null
+                                : () => detail(j),
+                            child: Padding(
+                              padding: const EdgeInsets.all(18),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          j.text('company'),
+                                          style: const TextStyle(
+                                            color: accent,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                      if (tab != 2)
+                                        IconButton(
+                                          tooltip: saved.containsKey(j.id)
+                                              ? 'Unsave job'
+                                              : 'Save job',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => toggleSaved(j),
+                                          icon: Icon(
+                                            saved.containsKey(j.id)
+                                                ? Icons.bookmark
+                                                : Icons.bookmark_border,
+                                            color: accent,
+                                          ),
+                                        ),
+                                      IconButton(
+                                        tooltip: applied.containsKey(j.id)
+                                            ? 'Mark as not applied'
+                                            : 'Mark as applied',
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: applying.contains(j.id)
+                                            ? null
+                                            : () => toggleApplied(j),
+                                        icon: Icon(
+                                          applied.containsKey(j.id)
+                                              ? Icons.check_circle
+                                              : Icons.check_circle_outline,
+                                          color: accent,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  Text(
+                                    j.companyWide && j.text('title').isEmpty
+                                        ? 'Company application'
+                                        : j.text('title'),
+                                    style: const TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w700,
+                                      color: ink,
+                                    ),
+                                  ),
+                                  if (tab == 2) ...[
+                                    const SizedBox(height: 10),
+                                    applicationPills(j.data),
+                                  ],
+                                  if (j.companyWide) ...[
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      latestEmail(j.data),
+                                      style: const TextStyle(
+                                        color: Colors.black54,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    SegmentedButton<String>(
+                                      showSelectedIcon: false,
+                                      style: const ButtonStyle(
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                      segments: [
+                                        const ButtonSegment(
+                                          value: 'company',
+                                          label: Text('Hide all'),
+                                        ),
+                                        ButtonSegment(
+                                          value: 'role',
+                                          label: const Text('Hide role'),
+                                          enabled: j.text('title').isNotEmpty,
+                                        ),
+                                        const ButtonSegment(
+                                          value: 'badge',
+                                          label: Text('Badge'),
+                                        ),
+                                      ],
+                                      selected: {j.match},
+                                      onSelectionChanged:
+                                          applying.contains(j.id)
+                                          ? null
+                                          : (v) => setMatch(j, v.first),
+                                    ),
+                                  ] else ...[
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      j.text('location'),
+                                      style: const TextStyle(
+                                        color: Colors.black54,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 6,
+                                      children: [
+                                        if (badged(j))
+                                          pill(
+                                            'Applied at ${badges[j.data['company_key']]!['company']} · ${appliedDate(badges[j.data['company_key']]!['applied_at'].toString())}',
+                                            false,
+                                          ),
+                                        if (j.ai != null)
+                                          pill(
+                                            '${engineLabel(j.ai!['engine'])} ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
+                                            j.ai!['verdict'] == 'apply',
+                                          ),
+                                        pill(
+                                          eligibilityLabel(
+                                            j.text('eligibility'),
+                                          ),
+                                          j.eligible,
+                                        ),
+                                        pill(j.text('type'), false),
+                                        ...j.matches
+                                            .take(3)
+                                            .map((m) => pill(m, false)),
+                                      ],
+                                    ),
+                                    if (j.aiList('reasons').isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 10),
+                                        child: Text(
+                                          j.aiList('reasons').first,
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            color: Color(0xFF3F4F4B),
+                                          ),
+                                        ),
+                                      ),
+                                    if (j.text('salary').isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 12),
+                                        child: Text(
+                                          j.text('salary'),
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                  const SizedBox(height: 14),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          j.companyWide
+                                              ? '${appliedLabel(j.text('applied_at'))} · From your email · ${matchSummary(j.match)}'
+                                              : '${tab == 2 ? '${appliedLabel(j.text('applied_at'))} · ' : ''}Jobs by ${j.sources.map(sourceName).join(', ')}',
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.black54,
+                                          ),
+                                        ),
+                                      ),
+                                      if (tab != 2)
+                                        TextButton(
+                                          onPressed: () {
+                                            setState(() {
+                                              if (dismissed.contains(j.id)) {
+                                                dismissed.remove(j.id);
+                                              } else {
+                                                dismissed.add(j.id);
+                                                saved.remove(j.id);
+                                              }
+                                            });
+                                            unawaited(persist());
+                                          },
+                                          child: Text(
+                                            tab == 3 ? 'Restore' : 'Dismiss',
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ],
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Text(switch (tab) {
-                        1 => plural(visible.length, 'saved role'),
-                        2 => plural(visible.length, 'applied role'),
-                        3 => plural(visible.length, 'dismissed role'),
-                        _ => plural(
-                          visible.length,
-                          'opportunity',
-                          'opportunities',
-                        ),
-                      }, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      const Spacer(),
-                      if (cached && tab != 2)
-                        const Text('Cached', style: TextStyle(color: accent)),
-                    ],
-                  ),
-                  if (tab == 0 && appliedHidden > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        'Left out ${plural(appliedHidden, 'role')} you already applied to.',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.black54,
-                        ),
-                      ),
-                    ),
-                  if (updated.isNotEmpty && tab != 2)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        'Last search: ${DateTime.tryParse(updated)?.toLocal().toString().split('.').first ?? updated}',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.black54,
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: 16),
-                  if (visible.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 32),
-                      child: Column(
-                        children: [
-                          Icon(
-                            switch (tab) {
-                              1 => Icons.bookmarks_outlined,
-                              2 => Icons.check_circle_outline,
-                              _ => Icons.travel_explore,
-                            },
-                            size: 48,
-                            color: accent,
-                          ),
-                          const SizedBox(height: 16),
-                          Text(
-                            switch (tab) {
-                              1 => 'Keep the roles that catch your eye.',
-                              2 => 'No applications marked yet.',
-                              3 => 'Nothing dismissed.',
-                              _ =>
-                                jobs.isEmpty && updated.isEmpty
-                                    ? 'A fresh start for your job search.'
-                                    : 'No roles match this view.',
-                            },
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w600,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(switch (tab) {
-                            0 => 'Choose your options, then fetch from your sources.',
-                            2 => 'Mark a role as applied and future searches will leave it out.',
-                            _ => 'Your choices are stored only on this device.',
-                          }, textAlign: TextAlign.center),
-                        ],
-                      ),
-                    ),
-                  ...visible.map(
-                    (j) => Padding(
-                      padding: const EdgeInsets.only(bottom: 14),
-                      child: Card(
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(22),
-                          onTap: tab == 2 && applied.containsKey(j.id)
-                              ? () => openApplication(j)
-                              : j.companyWide
-                              ? null
-                              : () => detail(j),
-                          child: Padding(
-                            padding: const EdgeInsets.all(18),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        j.text('company'),
-                                        style: const TextStyle(
-                                          color: accent,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                    ),
-                                    if (tab != 2)
-                                      IconButton(
-                                        tooltip: saved.containsKey(j.id)
-                                            ? 'Unsave job'
-                                            : 'Save job',
-                                        visualDensity: VisualDensity.compact,
-                                        onPressed: () => toggleSaved(j),
-                                        icon: Icon(
-                                          saved.containsKey(j.id)
-                                              ? Icons.bookmark
-                                              : Icons.bookmark_border,
-                                          color: accent,
-                                        ),
-                                      ),
-                                    IconButton(
-                                      tooltip: applied.containsKey(j.id)
-                                          ? 'Mark as not applied'
-                                          : 'Mark as applied',
-                                      visualDensity: VisualDensity.compact,
-                                      onPressed: applying.contains(j.id)
-                                          ? null
-                                          : () => toggleApplied(j),
-                                      icon: Icon(
-                                        applied.containsKey(j.id)
-                                            ? Icons.check_circle
-                                            : Icons.check_circle_outline,
-                                        color: accent,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Text(
-                                  j.companyWide && j.text('title').isEmpty
-                                      ? 'Company application'
-                                      : j.text('title'),
-                                  style: const TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w700,
-                                    color: ink,
-                                  ),
-                                ),
-                                if (tab == 2) ...[
-                                  const SizedBox(height: 10),
-                                  applicationPills(j.data),
-                                ],
-                                if (j.companyWide) ...[
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    latestEmail(j.data),
-                                    style: const TextStyle(
-                                      color: Colors.black54,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 12),
-                                  SegmentedButton<String>(
-                                    showSelectedIcon: false,
-                                    style: const ButtonStyle(
-                                      visualDensity: VisualDensity.compact,
-                                    ),
-                                    segments: [
-                                      const ButtonSegment(
-                                        value: 'company',
-                                        label: Text('Hide all'),
-                                      ),
-                                      ButtonSegment(
-                                        value: 'role',
-                                        label: const Text('Hide role'),
-                                        enabled: j.text('title').isNotEmpty,
-                                      ),
-                                      const ButtonSegment(
-                                        value: 'badge',
-                                        label: Text('Badge'),
-                                      ),
-                                    ],
-                                    selected: {j.match},
-                                    onSelectionChanged: applying.contains(j.id)
-                                        ? null
-                                        : (v) => setMatch(j, v.first),
-                                  ),
-                                ] else ...[
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    j.text('location'),
-                                    style: const TextStyle(
-                                      color: Colors.black54,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Wrap(
-                                    spacing: 6,
-                                    runSpacing: 6,
-                                    children: [
-                                      if (badged(j))
-                                        pill(
-                                          'Applied at ${badges[j.data['company_key']]!['company']} · ${appliedDate(badges[j.data['company_key']]!['applied_at'].toString())}',
-                                          false,
-                                        ),
-                                      if (j.ai != null)
-                                        pill(
-                                          '${engineLabel(j.ai!['engine'])} ${j.ai!['fit']} · ${verdictLabel(j.ai!['verdict'].toString())}',
-                                          j.ai!['verdict'] == 'apply',
-                                        ),
-                                      pill(
-                                        eligibilityLabel(j.text('eligibility')),
-                                        j.eligible,
-                                      ),
-                                      pill(j.text('type'), false),
-                                      ...j.matches
-                                          .take(3)
-                                          .map((m) => pill(m, false)),
-                                    ],
-                                  ),
-                                  if (j.aiList('reasons').isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 10),
-                                      child: Text(
-                                        j.aiList('reasons').first,
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          color: Color(0xFF3F4F4B),
-                                        ),
-                                      ),
-                                    ),
-                                  if (j.text('salary').isNotEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 12),
-                                      child: Text(
-                                        j.text('salary'),
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                                const SizedBox(height: 14),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        j.companyWide
-                                            ? '${appliedLabel(j.text('applied_at'))} · From your email · ${matchSummary(j.match)}'
-                                            : '${tab == 2 ? '${appliedLabel(j.text('applied_at'))} · ' : ''}Jobs by ${j.sources.map(sourceName).join(', ')}',
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.black54,
-                                        ),
-                                      ),
-                                    ),
-                                    if (tab != 2)
-                                      TextButton(
-                                        onPressed: () {
-                                          setState(() {
-                                            if (dismissed.contains(j.id)) {
-                                              dismissed.remove(j.id);
-                                            } else {
-                                              dismissed.add(j.id);
-                                              saved.remove(j.id);
-                                            }
-                                          });
-                                          unawaited(persist());
-                                        },
-                                        child: Text(
-                                          tab == 3 ? 'Restore' : 'Dismiss',
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
+      ),
     );
   }
 
@@ -1497,19 +1596,21 @@ class _OptionsPageState extends State<OptionsPage> {
     url = TextEditingController(text: widget.url);
     token = TextEditingController(text: widget.token);
     keywords = TextEditingController(text: o['keywords']);
-    AppUpdater.onInstallFailed((message) {
-      if (mounted) {
-        setState(() {
-          updateMessage = message;
-        });
-      }
-    });
-    unawaited(loadInstalled());
+    if (!kIsWeb) {
+      AppUpdater.onInstallFailed((message) {
+        if (mounted) {
+          setState(() {
+            updateMessage = message;
+          });
+        }
+      });
+    }
+    if (!kIsWeb) unawaited(loadInstalled());
   }
 
   @override
   void dispose() {
-    AppUpdater.channel.setMethodCallHandler(null);
+    if (!kIsWeb) AppUpdater.channel.setMethodCallHandler(null);
     url.dispose();
     token.dispose();
     keywords.dispose();
@@ -1568,15 +1669,22 @@ class _OptionsPageState extends State<OptionsPage> {
       checking = true;
       connection = null;
     });
-    final api = JobsApi(url.text.trim(), token.text.trim());
+    final api = JobsApi(
+      url.text.trim(),
+      token.text.trim(),
+      client: widget.httpClient?.call(),
+    );
     try {
       final health = await api.request('/health');
       final adzuna = health['adzuna_configured'] == true
           ? 'Connected. Adzuna credentials are ready.'
           : 'Connected. Remote boards ready; Adzuna needs credentials on the service.';
+      final linkedin = health['linkedin_available'] == true
+          ? ' LinkedIn agent ready.'
+          : ' LinkedIn needs jev-ultrafast on the service.';
       if (mounted) {
         setState(() {
-          connection = adzuna;
+          connection = adzuna + linkedin;
         });
       }
     } catch (_) {
@@ -1670,28 +1778,11 @@ class _OptionsPageState extends State<OptionsPage> {
       setState(() {
         progress = 0;
       });
-      final file = File('${local['cacheDir']}/fieldwork-update.apk');
-      await api.download(
-        '/app/fieldwork.apk',
-        file,
-        onProgress: (received, total) {
-          if (mounted && total > 0) {
-            setState(() {
-              progress = received / total;
-            });
-          }
-        },
-      );
-      if (await file.length() != latest['size']) {
-        throw Exception('The download was incomplete. Try again.');
-      }
-      if (mounted) {
-        setState(() {
-          progress = null;
-          updateMessage = 'Checking the download…';
-        });
-      }
-      await AppUpdater.install(file.path, latest['sha256'] as String);
+      await downloadAndInstall(api, local, latest, (received, total) {
+        if (mounted && total > 0) {
+          setState(() => progress = received / total);
+        }
+      });
       if (mounted) {
         setState(() {
           updateMessage = 'Confirm the update in the Android dialog, then open Fieldwork again.';
@@ -1727,7 +1818,9 @@ class _OptionsPageState extends State<OptionsPage> {
       });
       return;
     }
-    if (!(o['adzuna'] as bool) && (o['boards'] as List).isEmpty) {
+    if (!(o['adzuna'] as bool) &&
+        !(o['linkedin'] as bool) &&
+        (o['boards'] as List).isEmpty) {
       setState(() {
         connection = 'Enable at least one job source.';
       });
@@ -1768,272 +1861,296 @@ class _OptionsPageState extends State<OptionsPage> {
     appBar: AppBar(title: const Text('Your search options')),
     bottomNavigationBar: SafeArea(
       minimum: const EdgeInsets.all(16),
-      child: FilledButton(onPressed: save, child: const Text('Save options')),
+      child: ContentWidth(
+        maxWidth: 768,
+        child: FilledButton(onPressed: save, child: const Text('Save options')),
+      ),
     ),
-    body: ListView(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 30),
-      children: [
-        heading('Find your kind of work'),
-        DropdownButtonFormField<String>(
-          initialValue: o['preset'],
-          decoration: const InputDecoration(labelText: 'Role focus'),
-          items: const [
-            DropdownMenuItem(
-              value: 'backend',
-              child: Text('Node.js / TypeScript backend'),
-            ),
-            DropdownMenuItem(
-              value: 'broad',
-              child: Text('Backend + AI + Python / Go'),
-            ),
-            DropdownMenuItem(
-              value: 'gaming',
-              child: Text('Gaming industry + studio boards'),
-            ),
-          ],
-          onChanged: (v) => setState(() {
-            o['preset'] = v!;
-          }),
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: keywords,
-          maxLength: 200,
-          decoration: const InputDecoration(
-            labelText: 'Custom skills (optional)',
-            hintText: 'TypeScript, NestJS, LLM',
-            helperText: 'Comma separated. Replaces the preset’s core skills.',
-          ),
-        ),
-        toggle(
-          'remote_only',
-          'Fully remote only',
-          'Exclude hybrid, on-site, and unknown work styles.',
-        ),
-        toggle(
-          'prefer_contract',
-          'Put contracts first',
-          'Rank confirmed and likely contracts above full-time roles.',
-        ),
-        toggle(
-          'contract_only',
-          'Confirmed contracts only',
-          'Hide full-time, unknown, and unconfirmed contract roles.',
-        ),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<String>(
-          initialValue: o['eligibility'],
-          decoration: const InputDecoration(labelText: 'Hiring eligibility'),
-          items: const [
-            DropdownMenuItem(
-              value: 'romania',
-              child: Text('Romania / Europe / Worldwide'),
-            ),
-            DropdownMenuItem(
-              value: 'romania_unclear',
-              child: Text('Include unclear eligibility'),
-            ),
-            DropdownMenuItem(
-              value: 'all',
-              child: Text('All, including US-only roles'),
-            ),
-          ],
-          onChanged: (v) => setState(() {
-            o['eligibility'] = v!;
-          }),
-        ),
-        const SizedBox(height: 16),
-        Text('Posted within ${o['max_age_days']} days'),
-        Slider(
-          value: (o['max_age_days'] as num).toDouble(),
-          min: 1,
-          max: 90,
-          divisions: 89,
-          label: '${o['max_age_days']} days',
-          onChanged: (v) => setState(() {
-            o['max_age_days'] = v.round();
-          }),
-        ),
-        const Text(
-          'Studio boards list open roles and are not filtered by posting age.',
-          style: TextStyle(fontSize: 12, color: Colors.black54),
-        ),
-        heading('Ranking'),
-        toggle(
-          'ai_pick',
-          'Let AI rank the top roles',
-          'Scores up to 40 roles against your profile using the selected subscription.',
-        ),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<String>(
-          key: const ValueKey('ranking-engine'),
-          initialValue: o['ai_engine'],
-          decoration: const InputDecoration(labelText: 'Ranking engine'),
-          items: const [
-            DropdownMenuItem(value: 'claude', child: Text('Claude Code')),
-            DropdownMenuItem(value: 'codex', child: Text('Codex')),
-          ],
-          onChanged: (v) => setState(() {
-            o['ai_engine'] = v!;
-          }),
-        ),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<String>(
-          key: const ValueKey('ranking-subscription'),
-          initialValue: o['ai_subscription'],
-          decoration: const InputDecoration(labelText: 'Ranking subscription'),
-          items: const [
-            DropdownMenuItem(value: 'personal', child: Text('Personal')),
-            DropdownMenuItem(value: 'work', child: Text('Work')),
-          ],
-          onChanged: (v) => setState(() {
-            o['ai_subscription'] = v!;
-          }),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: checkingRanking ? null : checkRanking,
-          icon: const Icon(Icons.account_circle_outlined),
-          label: Text(
-            checkingRanking ? 'Checking accounts…' : 'Check ranking accounts',
-          ),
-        ),
-        Text(rankingStatus),
-        heading('Job sources'),
-        toggle(
-          'adzuna',
-          'Adzuna',
-          'Uses the credentials configured on your service.',
-        ),
-        const Text(
-          'Adzuna search markets (not your eligibility):',
-          style: TextStyle(fontSize: 13),
-        ),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          children:
-              {
-                    'us': 'US',
-                    'gb': 'UK',
-                    'de': 'Germany',
-                    'nl': 'Netherlands',
-                    'pl': 'Poland',
-                    'at': 'Austria',
-                    'es': 'Spain',
-                    'fr': 'France',
-                  }.entries
-                  .map(
-                    (e) => FilterChip(
-                      label: Text(e.value),
-                      selected: (o['countries'] as List).contains(e.key),
-                      onSelected: (v) => setState(() {
-                        final countries = o['countries'] as List;
-                        if (v && countries.length < 7) {
-                          countries.add(e.key);
-                        } else if (!v) {
-                          countries.remove(e.key);
-                        }
-                      }),
-                    ),
-                  )
-                  .toList(),
-        ),
-        const SizedBox(height: 12),
-        ...boardNames.entries.map(
-          (e) => CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(e.value),
-            value: (o['boards'] as List).contains(e.key),
+    body: ContentWidth(
+      maxWidth: 800,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 30),
+        children: [
+          heading('Find your kind of work'),
+          DropdownButtonFormField<String>(
+            initialValue: o['preset'],
+            decoration: const InputDecoration(labelText: 'Role focus'),
+            items: const [
+              DropdownMenuItem(
+                value: 'backend',
+                child: Text('Node.js / TypeScript backend'),
+              ),
+              DropdownMenuItem(
+                value: 'broad',
+                child: Text('Backend + AI + Python / Go'),
+              ),
+              DropdownMenuItem(
+                value: 'gaming',
+                child: Text('Gaming industry + studio boards'),
+              ),
+            ],
             onChanged: (v) => setState(() {
-              final list = o['boards'] as List;
-              v! ? list.add(e.key) : list.remove(e.key);
+              o['preset'] = v!;
             }),
           ),
-        ),
-        const Text(
-          'The gaming preset also searches the studio boards from cv-refactor when remote boards are enabled.',
-        ),
-        heading('Connect your service'),
-        const Text(
-          'Run scripts/serve.sh on your computer. For a USB-connected Android phone, run adb reverse tcp:8765 tcp:8765 and use the address below. For a hosted service, use its HTTPS address.',
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: url,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          decoration: const InputDecoration(
-            labelText: 'Service URL',
-            hintText: 'http://127.0.0.1:8765',
+          const SizedBox(height: 16),
+          TextField(
+            controller: keywords,
+            maxLength: 200,
+            decoration: const InputDecoration(
+              labelText: 'Custom skills (optional)',
+              hintText: 'TypeScript, NestJS, LLM',
+              helperText: 'Comma separated. Replaces the preset’s core skills.',
+            ),
           ),
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: token,
-          obscureText: true,
-          autocorrect: false,
-          enableSuggestions: false,
-          decoration: const InputDecoration(
-            labelText: 'Service access token',
-            helperText: 'From backend/.access-token. Not your Adzuna key.',
+          toggle(
+            'remote_only',
+            'Fully remote only',
+            'Exclude hybrid, on-site, and unknown work styles.',
           ),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: checking ? null : check,
-          icon: const Icon(Icons.link),
-          label: Text(checking ? 'Connecting…' : 'Test connection'),
-        ),
-        if (connection != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Text(connection!),
+          toggle(
+            'prefer_contract',
+            'Put contracts first',
+            'Rank confirmed and likely contracts above full-time roles.',
           ),
-        heading('App updates'),
-        Text(
-          installed == null
-              ? 'Installs builds that your computer publishes with scripts/build_apk.sh.'
-              : '${buildLabel(installed!)}. Updates come from the service above.',
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: updating
-              ? null
-              : release == null
-              ? checkUpdate
-              : installUpdate,
-          icon: Icon(
-            release == null
-                ? Icons.system_update_outlined
-                : Icons.download_rounded,
+          toggle(
+            'contract_only',
+            'Confirmed contracts only',
+            'Hide full-time, unknown, and unconfirmed contract roles.',
           ),
-          label: Text(
-            updating
-                ? progress != null
-                      ? 'Downloading…'
-                      : 'Working…'
-                : release == null
-                ? 'Check for app update'
-                : 'Install build ${release!['version_code']}',
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            initialValue: o['eligibility'],
+            decoration: const InputDecoration(labelText: 'Hiring eligibility'),
+            items: const [
+              DropdownMenuItem(
+                value: 'romania',
+                child: Text('Romania / Europe / Worldwide'),
+              ),
+              DropdownMenuItem(
+                value: 'romania_unclear',
+                child: Text('Include unclear eligibility'),
+              ),
+              DropdownMenuItem(
+                value: 'all',
+                child: Text('All, including US-only roles'),
+              ),
+            ],
+            onChanged: (v) => setState(() {
+              o['eligibility'] = v!;
+            }),
           ),
-        ),
-        if (progress != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: LinearProgressIndicator(value: progress),
+          const SizedBox(height: 16),
+          Text('Posted within ${o['max_age_days']} days'),
+          Slider(
+            value: (o['max_age_days'] as num).toDouble(),
+            min: 1,
+            max: 90,
+            divisions: 89,
+            label: '${o['max_age_days']} days',
+            onChanged: (v) => setState(() {
+              o['max_age_days'] = v.round();
+            }),
           ),
-        if (updateMessage != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Text(updateMessage!),
+          const Text(
+            'Studio boards list open roles and are not filtered by posting age.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
           ),
-        const SizedBox(height: 12),
-        const Text(
-          'Saved jobs, dismissed jobs, options, and cached results stay on this device. Jobs you mark as applied are kept on your service, so searches leave them out. No applications are submitted automatically.',
-          style: TextStyle(fontSize: 12, color: Colors.black54),
-        ),
-      ],
+          heading('Ranking'),
+          toggle(
+            'ai_pick',
+            'Let AI rank the top roles',
+            'Scores up to 40 roles against your profile using the selected subscription.',
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('ranking-engine'),
+            initialValue: o['ai_engine'],
+            decoration: const InputDecoration(labelText: 'Ranking engine'),
+            items: const [
+              DropdownMenuItem(value: 'claude', child: Text('Claude Code')),
+              DropdownMenuItem(value: 'codex', child: Text('Codex')),
+            ],
+            onChanged: (v) => setState(() {
+              o['ai_engine'] = v!;
+            }),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('ranking-subscription'),
+            initialValue: o['ai_subscription'],
+            decoration: const InputDecoration(
+              labelText: 'Ranking subscription',
+            ),
+            items: const [
+              DropdownMenuItem(value: 'personal', child: Text('Personal')),
+              DropdownMenuItem(value: 'work', child: Text('Work')),
+            ],
+            onChanged: (v) => setState(() {
+              o['ai_subscription'] = v!;
+            }),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: checkingRanking ? null : checkRanking,
+            icon: const Icon(Icons.account_circle_outlined),
+            label: Text(
+              checkingRanking ? 'Checking accounts…' : 'Check ranking accounts',
+            ),
+          ),
+          Text(rankingStatus),
+          heading('Job sources'),
+          toggle(
+            'adzuna',
+            'Adzuna',
+            'Uses the credentials configured on your service.',
+          ),
+          const Text(
+            'Adzuna search markets (not your eligibility):',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children:
+                {
+                      'us': 'US',
+                      'gb': 'UK',
+                      'de': 'Germany',
+                      'nl': 'Netherlands',
+                      'pl': 'Poland',
+                      'at': 'Austria',
+                      'es': 'Spain',
+                      'fr': 'France',
+                    }.entries
+                    .map(
+                      (e) => FilterChip(
+                        label: Text(e.value),
+                        selected: (o['countries'] as List).contains(e.key),
+                        onSelected: (v) => setState(() {
+                          final countries = o['countries'] as List;
+                          if (v && countries.length < 7) {
+                            countries.add(e.key);
+                          } else if (!v) {
+                            countries.remove(e.key);
+                          }
+                        }),
+                      ),
+                    )
+                    .toList(),
+          ),
+          const SizedBox(height: 12),
+          toggle(
+            'linkedin',
+            'LinkedIn',
+            'The jev-ultrafast browser agent searches in the Chrome profile signed in to LinkedIn on your computer. Adds about 30 seconds.',
+          ),
+          ...boardNames.entries.map(
+            (e) => CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(e.value),
+              value: (o['boards'] as List).contains(e.key),
+              onChanged: (v) => setState(() {
+                final list = o['boards'] as List;
+                v! ? list.add(e.key) : list.remove(e.key);
+              }),
+            ),
+          ),
+          const Text(
+            'The gaming preset also searches the studio boards from cv-refactor when remote boards are enabled.',
+          ),
+          heading('Connect your service'),
+          const Text(
+            kIsWeb
+                ? 'This website connects to the service at its own address. Paste the token from backend/.access-token below. Use the same Tailscale address on your other devices.'
+                : 'Run scripts/serve.sh on your computer. For a USB-connected Android phone, run adb reverse tcp:8765 tcp:8765 and use the address below. For a hosted service, use its HTTPS address.',
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: url,
+            readOnly: kIsWeb,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Service URL',
+              hintText: 'http://127.0.0.1:8765',
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: token,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'Service access token',
+              helperText: 'From backend/.access-token. Not your Adzuna key.',
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: checking ? null : check,
+            icon: const Icon(Icons.link),
+            label: Text(checking ? 'Connecting…' : 'Test connection'),
+          ),
+          if (connection != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(connection!),
+            ),
+          if (!kIsWeb) ...[
+            heading('App updates'),
+            Text(
+              installed == null
+                  ? 'Installs builds that your computer publishes with scripts/build_apk.sh.'
+                  : '${buildLabel(installed!)}. Updates come from the service above.',
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: updating
+                  ? null
+                  : release == null
+                  ? checkUpdate
+                  : installUpdate,
+              icon: Icon(
+                release == null
+                    ? Icons.system_update_outlined
+                    : Icons.download_rounded,
+              ),
+              label: Text(
+                updating
+                    ? progress != null
+                          ? 'Downloading…'
+                          : 'Working…'
+                    : release == null
+                    ? 'Check for app update'
+                    : 'Install build ${release!['version_code']}',
+              ),
+            ),
+            if (progress != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: LinearProgressIndicator(value: progress),
+              ),
+            if (updateMessage != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(updateMessage!),
+              ),
+          ],
+          if (kIsWeb) ...[
+            heading('Website updates'),
+            const Text(
+              'Reload this page to use the latest version published by your service. Saved roles and options are stored in this browser; applied jobs and chats are shared with the Android app.',
+            ),
+          ],
+          const SizedBox(height: 12),
+          const Text(
+            'Saved jobs, dismissed jobs, options, and cached results stay on this device. Jobs you mark as applied are kept on your service, so searches leave them out. No applications are submitted automatically.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+        ],
+      ),
     ),
   );
 }

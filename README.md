@@ -1,6 +1,6 @@
-# Fieldwork — Android jobs manager
+# Fieldwork — jobs manager for Android and web
 
-A personal Android app that combines **Adzuna** and the **remote-job search pipeline from cv-refactor**, with editable options, matching explanations, saved/dismissed jobs, and offline access to the last completed search.
+A personal Android and web app that combines **Adzuna**, **LinkedIn** (through the jev-ultrafast browser agent) and the **remote-job search pipeline from cv-refactor**, with editable options, matching explanations, saved/dismissed jobs, and offline access to the last completed search.
 
 ## Install and connect
 
@@ -40,6 +40,25 @@ Tailscale Serve gives the Mac's service a private HTTPS address that only your o
    With the app-store or standalone Mac app, the CLI is `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. `tailscale serve status` shows the address, `https://<mac-name>.<tailnet>.ts.net`; `tailscale serve reset` removes it. Do not use `tailscale funnel`, which makes the service public.
 4. In **Fieldwork → Options**, set the service URL to that `https://….ts.net` address, keep the same token, and tap **Test connection**. Tailscale must be connected on the phone.
 
+## Website version
+
+The website uses the same Flutter features and Python service as the Android app. Build it once, then start (or restart) the service:
+
+```sh
+./scripts/build_web.sh
+./scripts/serve.sh
+```
+
+Open `http://127.0.0.1:8765/` on the Mac, or the existing private Tailscale HTTPS address on any connected device. In **Search options → Connect your service**, paste the same token from `backend/.access-token`, then **Test connection → Save options**. The browser uses the address that served the page; it needs no separate API URL or CORS configuration. Neither the token nor any personal data is included in the website build. The public shell loads without a token, but all API data, the CV, and Claude commands still require it.
+
+- Wide windows use a sidebar; narrow windows keep bottom navigation. Search, source filters, AI ranking, saved/dismissed roles, application tracking and statistics, and Claude chat reuse the Android implementation. **Refresh applications** in the top bar supports desktop refresh without a pull gesture.
+- Applications, Gmail sync and chats are shared through the service. Saved/dismissed roles, settings, the access token and cached search results are stored separately in each browser's local storage. They are not imported from the phone. Localhost and the Tailscale address also have separate browser storage; use one address consistently. Clearing site data removes the browser's local copy.
+- The CV button downloads the authenticated PDF through the browser. Browser download settings determine its destination and whether duplicate names are renamed. Android's APK installer is omitted on the web; reload the page after a new web build.
+- Keep the Mac and service running for website loading and online features. Cached results can still be read if a loaded page loses its connection; this version does not install an offline service worker. Flutter's rendering assets are served locally.
+- Build output is gitignored under `build/web`. The service serves only web entry files and asset directories from that folder, with path traversal and symlink escape checks. Changes to the Flutter UI need a rebuild; changes to the Python service need a restart. The website remains private to your tailnet under the existing Tailscale Serve configuration.
+
+Checks: Flutter analysis, the native Flutter regression suite, Chrome tests for responsive layout, web options, ranking, daily refresh and chat, and backend tests including static-file isolation and API authentication pass. The release build was also exercised in a browser with synthetic jobs for connection, search, saving and persistence across reloads.
+
 ## App updates
 
 **Options → App updates → Check for app update** asks the service for the build in `artifacts/fieldwork.apk`. If that build is newer than the installed one, **Install build N** downloads it with the access token, checks its SHA-256 against the service, and hands it to Android's package installer. Confirm Android's "update this app" dialog, then open Fieldwork again. Saved jobs and settings are kept.
@@ -63,7 +82,7 @@ The document icon in the top bar, next to the options icon, saves your CV from t
 
 In **Options → Ranking**, turn on **Let AI rank the top roles**, choose **Claude Code** or **Codex**, then choose **Personal** or **Work** and tap **Save options**. The choice is saved on the phone and applies to the next search. It only changes job ranking; chats keep their existing login. **Check ranking accounts** reports whether each selected login is available on the service computer. It does not spend a model request or check remaining quota.
 
-The service sends the top 40 keyword matches to the chosen CLI under its subscription login. It returns a 0–100 fit, apply/maybe/skip, Romania eligibility, reasons and concerns. Cards and details name the engine that actually ranked the listing, including saved results from earlier searches. The ranking summary names the subscription too. If the selected login is unavailable or hits a limit, keyword results still appear with an explanation; the service never switches to another subscription automatically.
+The service sends the top 40 keyword matches to the chosen CLI under its subscription login. Each search carries the phone's latest 2,000 dismissed listing ids. Those roles skip the ranking step and come back last, unranked, so the Dismissed tab can still list and restore them. The CLI returns a 0–100 fit, apply/maybe/skip, Romania eligibility, reasons and concerns. Cards and details name the engine that actually ranked the listing, including saved results from earlier searches. The ranking summary names the subscription too. If the selected login is unavailable or hits a limit, keyword results still appear with an explanation; the service never switches to another subscription automatically.
 
 - **Claude:** by default, uses saved logins from the local Agents sidebar account store: `Personal` for Personal, and `Work` or the existing `ERPK` nickname for Work. `JOBS_CLAUDE_PERSONAL_ACCOUNT` and `JOBS_CLAUDE_WORK_ACCOUNT` override the aliases or stored account IDs. Alternatively, `JOBS_CLAUDE_PERSONAL_TOKEN_FILE` and `JOBS_CLAUDE_WORK_TOKEN_FILE` can point to private files holding subscription tokens from `claude setup-token`. Credentials stay on the computer and never enter the phone's settings. Expired saved logins must be renewed on the computer.
 - **Codex:** uses `JOBS_CODEX_PERSONAL_HOME` and `JOBS_CODEX_WORK_HOME` for separate signed-in CLI folders. Without these settings, the default `~/.codex/auth.json` is accepted only when its ChatGPT plan matches the selected Personal or Work category. API-key logins are rejected. This integration uses Codex file credential storage.
@@ -111,29 +130,65 @@ On October 9, 2026, statuses were filled in from the personal Gmail (September 2
 The speech-bubble icon in the top bar opens a chat with Claude Code on the computer that runs the service. Each message runs `claude -p` in the chat's folder and continues that chat's Claude Code session, with your settings, CLAUDE.md files, hooks and MCP connectors (Gmail included). Replies stream into the page while Claude works. Each command or file Claude touches appears as a one-line row, and **Stop** ends the reply along with any commands it started.
 
 - **Permissions:** auto mode, as at the desk. The classifier blocks risky actions, which appear as "Blocked by auto mode" rows. Anything that would wait for a permission prompt is refused, because nobody is at the terminal. Permission checks are never switched off.
+- **Model:** Opus 5.5 (`claude-opus-5-5`) at `xhigh` effort. `JOBS_CHAT_MODEL` and `JOBS_CHAT_EFFORT` change them; the empty chat page shows which are in use.
+- **Photos:** the photo button next to the message box adds up to five photos from the gallery or the camera, and a photo can be sent without text. The phone shrinks each one to at most 2048 px (JPEG quality 85) before upload; the service accepts JPEG, PNG, GIF and WebP up to 3.75 MB each, checking the file's own bytes rather than its label. Claude receives the photos as images, as if pasted into Claude Code, and the message also names where each copy is saved, so Claude can move or attach the file. Copies live in gitignored `backend/chat-images/<chat>/` (mode 600) and go when the chat is deleted. Tap a sent photo to see it full screen.
 - **Folders:** a new chat works in `~/Documents` or one of its visible subfolders; the app remembers the last choice. `JOBS_CLAUDE_ROOTS` (paths separated by `:`) changes the roots.
 - **History:** chats live in gitignored `backend/chats.json` (mode 600). **Chats** reopens or deletes one; deleting leaves Claude Code's own session files alone. The page opens on the latest chat. A reply that was running when the service stopped shows as interrupted.
-- **Limits:** one reply at a time per chat, three chats at once, 30 minutes per reply, 20,000 characters per message. When Claude Code warns that a subscription limit is near, the reply shows how much is used and when it resets.
+- **Limits:** one reply at a time per chat, three chats at once, 30 minutes per reply, 20,000 characters and five photos per message. When Claude Code warns that a subscription limit is near, the reply shows how much is used and when it resets.
 - **Security:** the service access token now lets whoever holds it run commands on this computer, within auto mode's limits. The service listens on `127.0.0.1` and is published only on the tailnet. Start the service with `JOBS_CLAUDE_CHAT=off` to switch the page off (the API then answers 403).
 
-The API: `GET /claude/folders`, `GET /claude/chats`, `GET /claude/chats/<id>?from=<turn>` (turns from that index, which the app polls every second while Claude works), `POST /claude/chats` with `{cwd, text}`, `POST /claude/chats/<id>/messages` with `{text}` (409 while a reply is running), `POST /claude/chats/<id>/stop` and `DELETE /claude/chats/<id>`.
+The API: `GET /claude/folders` (with the model and effort), `GET /claude/chats`, `GET /claude/chats/<id>?from=<turn>` (turns from that index, which the app polls every second while Claude works), `POST /claude/chats` with `{cwd, text, images}`, `POST /claude/chats/<id>/messages` with `{text, images}` (409 while a reply is running; `images` is an optional list of base64 files), `GET /claude/chats/<id>/images/<name>`, `POST /claude/chats/<id>/stop` and `DELETE /claude/chats/<id>`. The service sends each message to `claude -p` as one stream-json message on stdin (`--input-format stream-json`).
 
 **Verified** (October 9, 2026) live on a temporary service instance (the running service had the page switched off): a new chat in `~/Documents` ran Bash in auto mode and answered in 11 seconds on Opus with the subscription login. A second message resumed the same session and remembered the answer. The chat list and delete worked. On the emulator (Android 14, build 29859435, through the restarted service), the page opened from the top bar, a message ran `pwd` in auto mode, and the reply, its Bash rows and a weekly-limit note appeared. Not yet tried on the phone.
+
+**Photos verified** (October 10, 2026) live on a temporary service instance with the full Claude Code setup: a chat sent with a red test image ran on `claude-opus-5-5` at `xhigh`, answered "solid red" and named the saved copy's path. The image route returned the same bytes, and deleting the chat removed its folder. A direct `claude -p --resume` check showed the image stays in the session for later messages. Build 29860692 carries the photo button; it has not been tried on a device yet.
+
+## LinkedIn (jev-ultrafast browser agent)
+
+Every search also asks LinkedIn Jobs, after the other sources, because it takes about 30 seconds. The [jev-ultrafast](../jev-ultrafast) browser agent types the search in your signed-in LinkedIn, and code reads the listed jobs. Those roles then go through the same ranking, applied-job and dismissal rules as every other source.
+
+**Setup.** The service runs `backend/linkedin_jev.py` with jev-ultrafast's own Python (`~/Documents/jev-ultrafast/.venv/bin/python`; `JOBS_JEV_DIR` points elsewhere), in that folder. jev reads its own `.env` there: the TypeSafe key and `TEXT_MODEL_PROVIDER=codex`. The service passes none of its credentials. Every variable whose name contains KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL or ADZUNA is removed from the agent's environment. Chrome must be running with remote debugging allowed at `chrome://inspect/#remote-debugging`. Chrome asks "Allow remote debugging?" each time browser-harness makes a new connection. A window of the Chrome profile signed in to LinkedIn must be open. Problems appear on the LinkedIn source line, and the other sources continue.
+
+**What it does.**
+- **Opens a tab in the signed-in profile.** The runner finds that profile by the presence of its LinkedIn session cookie and never reads the value. Chrome's DevTools protocol opens new tabs only in Chrome's default profile, so the tab is opened from a visible tab of the signed-in profile, the way a link opens one. It appears in that window during the search and closes afterwards.
+- **Jev types the search.** The query is your keywords (up to three, joined with OR) or the preset's (`backend engineer` for broad), plus `remote` when Remote only is on. The location is Romania (`JOBS_LINKEDIN_LOCATION`). The agent sets no LinkedIn filters, because in the 12 Oct trials it lost its way in the filter menus. Remote and age come from each job's details instead.
+- **Code checks every action the agent chooses, before it runs.** Refused, matched on English and Romanian labels: Apply and Easy Apply, Save, dismissing a job, Share, Message, Follow, Connect, job alerts and every switch, job preferences, settings and sign-out. The run also stops if the tab leaves `linkedin.com/jobs`. Limits are 16 executed actions, 40 model decisions and 150 seconds.
+- **Code waits for each page to settle.** Before every decision it waits until jev's page marker holds still for a second; LinkedIn keeps re-rendering for about four seconds after each load. If the same target is reported covered twice, code presses Escape, which closes LinkedIn's suggestion list. A fourth stale result in a row stops the run.
+- **Checks the result.** After the agent says it is done, code checks that the page is a `/jobs/search` for the requested keywords in Romania.
+- **Reads up to 25 listed jobs.** It uses the JSON endpoint LinkedIn's own job page calls, which returns English title, company, location, workplace type, listing date, employment type and description even though the profile's interface is Romanian. The workplace type is appended to the location, for example "EMEA (Remote)", so the remote and eligibility rules apply.
+
+**Cost and limits.**
+- An uncached search makes about three TypeSafe requests on jev's key and one Codex request on your ChatGPT sign-in, for the typed keywords.
+- Results are cached for an hour, like other sources.
+- LinkedIn's terms forbid automated access. This uses your own account at personal volume, but LinkedIn can still restrict accounts it flags.
+
+**Switching it off.** Turn off **Options → Job sources → LinkedIn** (on by default; saved on the phone), or set `JOBS_LINKEDIN=off` on the service. LinkedIn alone counts as an enabled source. `/health` reports `linkedin_available`, and **Test connection** says whether the LinkedIn agent is ready. Build 29863531 has the switch and the summary line "Adzuna + LinkedIn + 8 remote boards"; checked on the emulator, and `test/ranking_options_test.dart` covers it.
+
+**Diagnosis.** Run it by hand with the request printed by `linkedin.request` plus a `goal`:
+
+```sh
+cd ~/Documents/jev-ultrafast && .venv/bin/python -I ~/Documents/jobs-manager/backend/linkedin_jev.py < request.json
+```
+
+The printed JSON adds `decided` (each decision) and `trace` (each executed action).
+
+**Checked on 12 Oct 2026.** The live run typed `backend engineer remote` and clicked Search. That took 2 actions and 3 model decisions, 31 seconds in all, and returned 25 jobs. Through the service's own path, with LinkedIn as the only source and AI ranking off, 12 of the 25 passed ranking: all remote, open to Romania and posted in the last 30 days. Proxify's role came last with its applied badge. A repeat search came from the cache in 0.1 s. `backend/tests/test_linkedin.py` covers the guard, the goal, the result check, the subprocess contract and the agent loop, all with fakes.
 
 ## Options and behavior
 
 - Defaults from your October 9 cv-refactor preferences: fully remote, Romania/Europe/worldwide eligibility, contracts first, backend/AI/Python/Go focus.
 - Presets: Node.js/TypeScript backend; broader backend and AI; gaming with studio boards.
 - Custom comma-separated skills replace the preset's core matching terms. They also customize Adzuna and Himalayas queries; other feeds are filtered after collection.
-- Enable Adzuna and individual remote boards: Remotive, Remote OK, Himalayas, Jobicy, Working Nomads, We Work Remotely, Arbeitnow, Hacker News. Gaming additionally uses the reference's Greenhouse, Lever, Ashby, SmartRecruiters, Workable, and Teamtailor studio lists.
+- LinkedIn is on by default (see above). Enable Adzuna and individual remote boards: Remotive, Remote OK, Himalayas, Jobicy, Working Nomads, We Work Remotely, Arbeitnow, Hacker News. Gaming additionally uses the reference's Greenhouse, Lever, Ashby, SmartRecruiters, Workable, and Teamtailor studio lists.
 - Select Adzuna search markets, maximum posting age, confirmed-contract-only, contract preference, remote-only, and eligibility scope.
 - Eligibility is inferred from source location fields and selected explicit restrictions, not verified work authorization. Explicit country lists take priority; timezone compatibility alone does not establish Romania eligibility. Confirm restrictions in the original posting.
-- Matching uses the reference's weighted keyword rules, excludes unsuitable titles, and explains matched core skills. Scores are points, not percentages or model confidence. No Jev calls or automatic applications are made.
+- Matching uses the reference's weighted keyword rules, excludes unsuitable titles, and explains matched core skills. Scores are points, not percentages or model confidence. Only the LinkedIn source uses Jev, to type the search; nothing applies to jobs automatically.
 - Deduplication combines equal company/title/location records and retains source attribution. Different location variants remain separate.
 - The **Returned by** dropdown under the results search narrows Discover, Saved and Dismissed to the roles one source returned, listing each source with its count in the current view, most first. A role merged from several sources counts for each of them. The choice holds across tabs until you pick **All sources**; it is not saved between launches. The Applied tab has no source filter. Checked on the emulator (build 29859420): with the 79 cached roles, the menu listed We Work Remotely 29, Jobicy 24, Hacker News 10, Remotive 7, Himalayas 5 and Working Nomads 4. Adzuna, Remote OK and Arbeitnow had no roles in that result set, so they were not listed. Choosing Jobicy showed 24 opportunities, each marked "Jobs by Jobicy".
 - Source failures are shown individually. If all fail, the app keeps its previous results. Successful empty searches replace old results. Saved jobs persist independently of search results; dismissing a job removes it from Saved. Restore returns it to Discover. Applied jobs are stored on the service (see above).
 - Sources are cached in service memory for one hour to reduce repeated calls; cache clears on service restart. One search runs at a time. Adzuna uses one page per query/country, Himalayas one page per type for up to three queries, and Arbeitnow two pages. This is a bounded search, not exhaustive coverage.
 - Searches can take several minutes. The app polls source status. Leaving Options unchanged and retrying while the service is still searching rejoins that run. The service continues if the phone closes; it does not schedule recurring searches.
+- The app keeps the running search's id until its results arrive. In the background, Android pauses the app or cuts its network, so a failed poll waits for the app to come back instead of ending the search. On return, or on the next launch if Android closed the app, it collects the results from the service. On screen, it gives up after three failed polls in a row and keeps the id for the next resume. A search the service no longer has (for example after a restart) shows "Search expired" once. Verified in `test/background_search_test.dart`.
 - App data stays in private Android storage with backup disabled. Service tokens are stored in that private app storage. The service holds fetched listings in memory. No analytics are included.
 
 ## Development and checks
@@ -152,7 +207,7 @@ The backend tests include the original collector regression suite, preference/el
 
 Record a feature's checks in that feature's own section, and leave test totals out: the suites report their own counts. Parallel branches that each added a note at the top of **Verification**, or updated one shared totals line, kept conflicting in this file.
 
-The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `backend/claude_chat.py` (the Claude page), `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
+The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `backend/claude_chat.py` (the Claude page), `backend/linkedin.py` and `backend/linkedin_jev.py` (LinkedIn), `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
 
 ## Verification (October 9, 2026)
 

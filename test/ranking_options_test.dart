@@ -12,7 +12,10 @@ void main() {
   testWidgets('ranking selections persist and reach the next search', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({'token': 'test-token'});
+    SharedPreferences.setMockInitialValues({
+      'token': 'test-token',
+      'dismissed': ['old', 'new'],
+    });
     Map<String, dynamic>? request;
     http.Client client() => MockClient((r) async {
       if (r.url.path == '/ranking/accounts') {
@@ -83,10 +86,91 @@ void main() {
     await tester.pumpAndSettle();
     expect(request?['ai_engine'], 'codex');
     expect(request?['ai_subscription'], 'work');
+    expect(request?['dismissed'], ['old', 'new']);
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(JobsApp(httpClient: client));
     await tester.pumpAndSettle();
     expect(find.textContaining('Codex picks'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the LinkedIn switch reaches the search and counts as a source', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'token': 'test-token',
+      'options': jsonEncode({'adzuna': false, 'boards': []}),
+    });
+    final requests = <Map<String, dynamic>>[];
+    http.Client client() => MockClient((r) async {
+      if (r.url.path == '/search') {
+        requests.add(jsonDecode(r.body) as Map<String, dynamic>);
+        return http.Response('{"id":"test"}', 202);
+      }
+      if (r.url.path == '/search/test') {
+        return http.Response(
+          jsonEncode({
+            'status': 'complete',
+            'current': 'Search complete',
+            'fetched': 0,
+            'sources': [],
+            'jobs': [],
+            'updated_at': '2026-10-12T12:00:00Z',
+          }),
+          200,
+        );
+      }
+      return http.Response('{"jobs":[]}', 200);
+    });
+    await tester.pumpWidget(JobsApp(httpClient: client));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('LinkedIn + 0 remote boards'), findsOneWidget);
+    await tester.tap(find.byTooltip('Search options'));
+    await tester.pumpAndSettle();
+    final linkedin = find.widgetWithText(SwitchListTile, 'LinkedIn');
+    await tester.scrollUntilVisible(
+      linkedin,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(tester.widget<SwitchListTile>(linkedin).value, isTrue);
+    // LinkedIn alone is enough to search.
+    await tester.tap(find.text('Save options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find opportunities'));
+    await tester.pumpAndSettle();
+    expect(requests.last['linkedin'], isTrue);
+    await tester.tap(find.byTooltip('Search options'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      linkedin,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(linkedin);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Your search options'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Enable at least one job source.'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    final adzuna = find.widgetWithText(SwitchListTile, 'Adzuna');
+    await tester.scrollUntilVisible(
+      adzuna,
+      -250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(adzuna);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find opportunities'));
+    await tester.pumpAndSettle();
+    expect(requests.last['linkedin'], isFalse);
+    expect(requests.last['adzuna'], isTrue);
     expect(tester.takeException(), isNull);
   });
 
@@ -105,5 +189,14 @@ void main() {
       'Claude ranked the top 1 role.',
     );
     expect(romaniaLabel('yes', 'Codex'), 'Codex: open to Romania');
+  });
+
+  test('a search sends only the latest dismissals the service accepts', () {
+    final ids = {for (var i = 0; i < maxDismissedSent + 5; i++) 'id$i'};
+    final sent = recentDismissed(ids);
+    expect(sent.length, maxDismissedSent);
+    expect(sent.first, 'id5');
+    expect(sent.last, 'id${maxDismissedSent + 4}');
+    expect(recentDismissed({'a', 'b'}), ['a', 'b']);
   });
 }
