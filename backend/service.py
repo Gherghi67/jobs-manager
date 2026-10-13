@@ -33,13 +33,15 @@ import adzuna_search as az
 import remote_search as remote
 import ai_pick as ai
 import claude_chat
+import glassdoor
 import gmail_sync
+import jev
 import linkedin
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
 # The markets the app offers. All eight with the broad preset's 4 queries make 32 calls at 2.5 s apart.
 ADZUNA_MARKETS = ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr')
-DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
+DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, glassdoor=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
                 keywords='', remote_only=True, eligibility='romania', contract_only=False,
                 prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal',
                 dismissed=[])
@@ -61,7 +63,7 @@ def validate_options(value):
     ai.accounts.validate(o['ai_engine'], o['ai_subscription'])
     if o['preset'] not in ('backend', 'broad', 'gaming'):
         raise ValueError('Unknown preset.')
-    for key in ('adzuna', 'linkedin', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
+    for key in ('adzuna', 'linkedin', 'glassdoor', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
         if type(o[key]) is not bool:
             raise ValueError(f'{key} must be true or false.')
     if not isinstance(o['boards'], list) or any(x not in PUBLIC_SOURCES for x in o['boards']):
@@ -71,7 +73,8 @@ def validate_options(value):
     if (not isinstance(countries, list) or not countries or any(x not in ADZUNA_MARKETS for x in countries)
             or len(set(countries)) != len(countries)):
         raise ValueError('Choose supported Adzuna countries, each once.')
-    if not o['adzuna'] and not (o['linkedin'] and linkedin.enabled()) and not o['boards']:
+    agents = (o['linkedin'] and linkedin.enabled()) or (o['glassdoor'] and glassdoor.enabled())
+    if not o['adzuna'] and not agents and not o['boards']:
         raise ValueError('Enable at least one source.')
     if o['eligibility'] not in ('romania', 'romania_unclear', 'all'):
         raise ValueError('Unknown eligibility option.')
@@ -456,7 +459,7 @@ def jev_price():
 
 
 class JevUsage:
-    """What the LinkedIn browser agent used on each search, kept on the service for the app.
+    """What the browser agent (LinkedIn, Glassdoor) used on each search, kept on the service for the app.
     Dollars are an estimate from input tokens at the configured price, plus any text-helper cost an API billed."""
     FIELDS = ('requests', 'input_tokens', 'output_tokens', 'text_calls', 'text_tokens')
     KEEP = 500
@@ -481,11 +484,11 @@ class JevUsage:
         return self.data
 
     def add(self, usage):
-        """Never raises: losing one record must not lose the search's LinkedIn roles."""
+        """Never raises: losing one record must not lose the search's roles."""
         row = {k: usage[k] if type(usage.get(k)) is int and usage[k] >= 0 else 0 for k in self.FIELDS}
         cost = usage.get('text_cost')
         row.update(text_cost=float(cost) if type(cost) in (int, float) and cost >= 0 else None,
-                   text_model=str(usage.get('text_model') or '')[:80],
+                   text_model=str(usage.get('text_model') or '')[:80], source=str(usage.get('source') or '')[:20],
                    at=dt.datetime.fromtimestamp(self.clock(), dt.timezone.utc).isoformat(timespec='seconds'))
         try:
             with self.lock:
@@ -599,9 +602,11 @@ class Engine:
             plans += [(name, c.get('sources', {}).get(name, config('remote_config.json')['sources'].get(name, {}))) for name in o['boards']]
             if o['preset'] == 'gaming' and o['boards']:
                 plans += [(name, opts) for name, opts in c['sources'].items() if name not in PUBLIC_SOURCES]
-            # Last: the browser agent takes the longest, so the other sources show first.
+            # Last: the browser agents take the longest, so the other sources show first.
             if o['linkedin'] and linkedin.enabled():
                 plans.append(('linkedin', None))
+            if o['glassdoor'] and glassdoor.enabled():
+                plans.append(('glassdoor', None))
             self.update(key, total=len(plans))
             for name, options in plans:
                 self.update(key, current=f'Fetching {name}', source=name)
@@ -609,9 +614,10 @@ class Engine:
                     if name == 'adzuna':
                         cache_key = json.dumps(['adzuna', o['preset'], o['countries'], o['keywords'], o['max_age_days']], sort_keys=True)
                         (rows, warnings), cached = self.cached(cache_key, lambda: self.adzuna(o))
-                    elif name == 'linkedin':
-                        cache_key = json.dumps(['linkedin', linkedin.request(o)], sort_keys=True)
-                        (rows, warnings), cached = self.cached(cache_key, lambda: linkedin.fetch(o, remote.job, record=self.jev_usage.add))
+                    elif name in ('linkedin', 'glassdoor'):
+                        site = linkedin if name == 'linkedin' else glassdoor
+                        cache_key = json.dumps([name, site.request(o)], sort_keys=True)
+                        (rows, warnings), cached = self.cached(cache_key, lambda: site.fetch(o, remote.job, record=self.jev_usage.add))
                     else:
                         options = copy.deepcopy(options)
                         if name == 'himalayas':
@@ -632,7 +638,7 @@ class Engine:
                     statuses.append(dict(name=name, status='partial' if warnings else 'ok', count=len(rows), cached=cached, message=str(warnings) if warnings else ''))
                 except Exception as exc:
                     # Never expose upstream URLs that could contain API keys.
-                    own = (name == 'adzuna' and isinstance(exc, ValueError)) or isinstance(exc, linkedin.LinkedInError)
+                    own = (name == 'adzuna' and isinstance(exc, ValueError)) or isinstance(exc, jev.AgentError)
                     message = str(exc) if own else f'{type(exc).__name__}: source unavailable; other sources continue.'
                     statuses.append(dict(name=name, status='error', count=0, cached=False, message=message))
                 # Applied roles go before Claude's step, so they are never ranked or shown again.
@@ -755,7 +761,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/health':
             self.respond(200, {'status': 'ok', 'adzuna_configured': bool(os.environ.get('ADZUNA_APP_ID') and os.environ.get('ADZUNA_APP_KEY')),
                                'claude_available': ai.available(), 'claude_chat': claude_chat.enabled(),
-                               'linkedin_available': linkedin.enabled()})
+                               'linkedin_available': linkedin.enabled(), 'glassdoor_available': glassdoor.enabled()})
         elif path == '/app':
             self.respond(200, app_release())
         elif path == '/ranking/accounts':
@@ -768,7 +774,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(500, {'error': str(exc)})
         elif path == '/gmail-sync':
             self.respond(200, self.gmail.status() if self.gmail else {'enabled': False})
-        elif path == '/linkedin/usage':
+        # /linkedin/usage is the name builds before Glassdoor still ask for.
+        elif path in ('/jev/usage', '/linkedin/usage'):
             try:
                 self.respond(200, self.engine.jev_usage.summary())
             except StoreError as exc:

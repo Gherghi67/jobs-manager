@@ -12,8 +12,10 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ['JOBS_LINKEDIN'] = 'off'
+os.environ['JOBS_GLASSDOOR'] = 'off'
+import jev
+import jev_runner as runner
 import linkedin
-import linkedin_jev as runner
 import service as s
 
 TODAY_MS = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
@@ -125,7 +127,7 @@ class FetchTests(unittest.TestCase):
             if exc:
                 raise exc
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr='hint\n')
-        with patch.object(linkedin.subprocess, 'run', fake), \
+        with patch.object(jev.subprocess, 'run', fake), \
              patch.dict(os.environ, {'ADZUNA_APP_KEY': 'a', 'JOBS_ACCESS_TOKEN': 'b', 'ANTHROPIC_API_KEY': 'c', 'PYTHONPATH': 'x'}):
             return linkedin.fetch(self.options, s.remote.job)
 
@@ -168,13 +170,13 @@ class FetchTests(unittest.TestCase):
                        dict(status='error', message='Chrome is closed.')):
             recorded = []
             with self.subTest(result=result), patch.object(
-                    linkedin.subprocess, 'run',
+                    jev.subprocess, 'run',
                     lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(result), stderr='')):
                 try:
                     linkedin.fetch(self.options, s.remote.job, record=recorded.append)
                 except linkedin.LinkedInError:
                     self.assertEqual(result['status'], 'error')
-                self.assertEqual(recorded, [usage] if 'usage' in result else [])
+                self.assertEqual(recorded, [dict(usage, source='linkedin')] if 'usage' in result else [])
 
 
 class UsageTests(unittest.TestCase):
@@ -284,9 +286,9 @@ class FakeAgent:
 
 
 class DriveTests(unittest.TestCase):
-    def drive(self, agent, deadline=None):
+    def drive(self, agent, deadline=None, **kwargs):
         self.log = []
-        return runner.drive(agent, Stale, deadline or time.monotonic() + 30, self.log)
+        return runner.drive(agent, Stale, deadline or time.monotonic() + 30, self.log, linkedin, **kwargs)
 
     def test_search_runs_until_done(self):
         fill = click('Căutați după titlul jobului', role='combobox', kind='fill')
@@ -328,10 +330,17 @@ class DriveTests(unittest.TestCase):
             self.drive(agent)
         self.assertIn('kept covering', str(caught.exception))
 
+    def test_stops_once_the_search_page_is_reached(self):
+        agent = FakeAgent([('a1', click('Căutați după titlul jobului', role='combobox', kind='fill'), 'https://www.linkedin.com/jobs/search/'),
+                           ('a1', click('Romania'), RESULTS), ('a1', click('Căutați'), 'STALE')])
+        self.assertEqual(self.drive(agent, searched=lambda url: url == RESULTS), 2)
+        self.assertEqual(agent.acted, ['a1', 'a1'])
+        self.assertEqual(self.log[-1], 'DONE (search page reached)')
+
     def test_waits_before_every_decision(self):
         waits = []
         agent = FakeAgent([('a1', click('Căutați'), RESULTS), ('DONE', None, RESULTS)])
-        runner.drive(agent, Stale, time.monotonic() + 30, [], lambda: waits.append(len(agent.state['decisions'])))
+        runner.drive(agent, Stale, time.monotonic() + 30, [], linkedin, lambda: waits.append(len(agent.state['decisions'])))
         self.assertEqual(waits, [0, 1])
 
     def test_settle_returns_once_the_page_holds_still(self):

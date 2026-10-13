@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Searches here must never start the real LinkedIn browser agent.
 os.environ['JOBS_LINKEDIN'] = 'off'
+os.environ['JOBS_GLASSDOOR'] = 'off'
 import service as s
 
 

@@ -10,10 +10,11 @@ const boardNames = <String, String>{
 };
 
 // Display names for every source key the service reports, including Adzuna,
-// LinkedIn and the gaming preset's studio boards.
+// LinkedIn, Glassdoor and the gaming preset's studio boards.
 const sourceNames = <String, String>{
   'adzuna': 'Adzuna',
   'linkedin': 'LinkedIn',
+  'glassdoor': 'Glassdoor',
   ...boardNames,
   'greenhouse': 'Greenhouse',
   'lever': 'Lever',
@@ -32,6 +33,7 @@ Map<String, dynamic> defaultOptions() => {
   'preset': 'broad',
   'adzuna': true,
   'linkedin': true,
+  'glassdoor': true,
   'boards': boardNames.keys.toList(),
   'countries': ['de', 'nl', 'gb'],
   'keywords': '',
@@ -111,22 +113,24 @@ String tokenCount(num value) => value >= 1000000
     ? '${(value / 1000).toStringAsFixed(1)}k'
     : '${value.toInt()}';
 
-// What the LinkedIn browser agent cost, from the service's /linkedin/usage.
+// What the browser agent cost on LinkedIn and Glassdoor, from the service's
+// /jev/usage. Each site's search is one agent run.
 String jevUsageText(Map<String, dynamic> usage) {
   num value(Map row, String key) => row[key] as num? ?? 0;
   String period(Map row) =>
-      '${plural(value(row, 'runs').toInt(), 'search', 'searches')}, '
+      '${plural(value(row, 'runs').toInt(), 'agent run')}, '
       '${dollars(value(row, 'cost'))}';
   final last = usage['last'] as Map?;
   if (last == null) {
-    return 'Jev usage: no LinkedIn search has run the agent yet.';
+    return 'Jev usage: no LinkedIn or Glassdoor search has run the agent yet.';
   }
   final textCost = last['text_cost'] as num?;
   final text = value(last, 'text_calls') == 0
       ? ''
       : ' Field text: ${last['text_model']}, '
             '${textCost == null ? 'no dollar cost reported' : dollars(textCost)}.';
-  return 'Jev usage, last search: '
+  final site = sourceNames[last['source']];
+  return 'Jev usage, last run${site == null ? '' : ' ($site)'}: '
       '${plural(value(last, 'requests').toInt(), 'request')}, '
       '${tokenCount(value(last, 'input_tokens'))} input tokens, '
       '${dollars(value(last, 'cost'))}. '

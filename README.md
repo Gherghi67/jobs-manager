@@ -159,7 +159,7 @@ Every search also asks LinkedIn Jobs, after the other sources, because it takes 
 
 **Cost and limits.**
 - An uncached search makes about three TypeSafe requests on jev's key and one Codex request on your ChatGPT sign-in, for the typed keywords.
-- **Options → Job sources** shows the usage under the LinkedIn switch: the last search's TypeSafe requests, input tokens and cost, then the last 30 days and all time. The runner adds each run's usage to its result, including failed runs that reached the agent; stale decisions count, because each one is a request. The service keeps it in gitignored `backend/jev-usage.json` (`JOBS_JEV_USAGE_FILE`; the last 500 runs plus running totals) and serves it at `GET /linkedin/usage`. TypeSafe reports tokens, not dollars, and its docs publish no price, so dollars are estimated at $0.042 per million input tokens (output is free), the rate third-party listings gave in October 2026. Set `JOBS_JEV_PRICE` if that changes. Field text through Codex runs on the subscription, so it has no dollar cost; through an API, OpenRouter's reported `cost` is added. A run killed by the 240-second backstop records nothing.
+- **Options → Job sources** shows the usage under the LinkedIn and Glassdoor switches: the last agent run's site and TypeSafe requests, input tokens and cost, then the last 30 days and all time. The runner adds each run's usage to its result, including failed runs that reached the agent; stale decisions count, because each one is a request. The service keeps it in gitignored `backend/jev-usage.json` (`JOBS_JEV_USAGE_FILE`; the last 500 runs plus running totals) and serves it at `GET /jev/usage` (`/linkedin/usage` stays for older builds). Each run records its site, and the totals cover both sites. TypeSafe reports tokens, not dollars, and its docs publish no price, so dollars are estimated at $0.042 per million input tokens (output is free), the rate third-party listings gave in October 2026. Set `JOBS_JEV_PRICE` if that changes. Field text through Codex runs on the subscription, so it has no dollar cost; through an API, OpenRouter's reported `cost` is added. A run killed by the 240-second backstop records nothing.
 - Results are cached for an hour, like other sources. A cached result runs no agent and costs nothing.
 - LinkedIn's terms forbid automated access. This uses your own account at personal volume, but LinkedIn can still restrict accounts it flags.
 
@@ -174,6 +174,30 @@ cd ~/Documents/jev-ultrafast && .venv/bin/python -I ~/Documents/jobs-manager/bac
 The printed JSON adds `decided` (each decision) and `trace` (each executed action).
 
 **Checked on 12 Oct 2026.** The live run typed `backend engineer remote` and clicked Search. That took 2 actions and 3 model decisions, 31 seconds in all, and returned 25 jobs. Through the service's own path, with LinkedIn as the only source and AI ranking off, 12 of the 25 passed ranking: all remote, open to Romania and posted in the last 30 days. Proxify's role came last with its applied badge. A repeat search came from the cache in 0.1 s. `backend/tests/test_linkedin.py` covers the guard, the goal, the result check, the subprocess contract and the agent loop, all with fakes.
+
+## Glassdoor (jev-ultrafast browser agent)
+
+Glassdoor has no public API, and its job listings now come from Indeed. Every search also asks Glassdoor, after LinkedIn, the same way: the jev-ultrafast agent types the search, and code reads the jobs. It adds about a minute, most of it spent reading each role's page.
+
+**Setup.** As for LinkedIn: the same jev-ultrafast install and `.env`, Chrome with remote debugging allowed, and a window of the Chrome profile signed in to LinkedIn. Glassdoor runs in that profile too (on 12 Oct it was also signed in to Glassdoor), because the runner finds the job-hunting profile by its LinkedIn session cookie. The service runs `backend/glassdoor_jev.py`. The shared parts live in `backend/jev.py` (service side: the subprocess contract, the environment scrub and the usage count) and `backend/jev_runner.py` (in jev's virtualenv: the profile tab, the settle wait and the checked agent loop).
+
+**What it does.**
+- **Jev types the search** at `glassdoor.com/Job`: the first of your keywords (Glassdoor's title field takes one phrase, not LinkedIn's OR) or the preset's, plus `remote` when Remote only is on, in Romania. Picking Romania from the location suggestions runs the search, so code ends the run as soon as the tab shows the requested search page. Otherwise the agent kept looking for a Search button that was covered.
+- **Code checks every action before it runs.** Refused: Apply and Easy Apply, Save, Hide and Not interested, Share, Message, Follow, job alerts, reviews and salaries (the "give to get" wall), Tailor my resume and resume uploads, AI insights, "Let employers find and reach out to you", Glassdoor Recruiter, profile, preferences, settings and sign-out, plus every switch and checkbox. The run stops if the tab leaves `glassdoor.com/Job`. The limits are LinkedIn's: 16 actions, 40 decisions, 150 seconds.
+- **Checks the result** from the search page's URL, `/Job/romania-backend-engineer-remote-jobs-SRCH_IL.0,7_IN203_KO8,31.htm`. Its `IL` and `KO` spans name the location and keyword parts of the slug, and both must match the request.
+- **Reads up to 25 listed jobs.** For each card it fetches the role's Glassdoor page inside the signed-in tab, about 1 s each with a 0.3 s pause, and reads the page's schema.org `JobPosting`: title, company, location, posting date, employment type, description, whether it is remote (`TELECOMMUTE`), and where applicants may live. For remote roles, that country list becomes an explicit restriction, as Himalayas' does, so a US-only remote role is dropped and a Romania one kept. If Glassdoor refuses detail reads, the rest keep only their card (title, company, location, salary), and the source line says so.
+
+**Cost.** About three TypeSafe requests (roughly 15,000 input tokens, about $0.0006 at the estimated rate) and two Codex requests per uncached search. These are counted in the same usage log as LinkedIn and tagged `glassdoor`. Results are cached for an hour. Glassdoor's terms also forbid automated access; this is your own account at personal volume.
+
+**Switching it off.** **Options → Job sources → Glassdoor** (on by default), or `JOBS_GLASSDOOR=off` on the service. Glassdoor alone counts as an enabled source. `/health` reports `glassdoor_available`, and **Test connection** says whether the Glassdoor agent is ready.
+
+**Diagnosis.** Same as LinkedIn, with the request from `glassdoor.request`:
+
+```sh
+cd ~/Documents/jev-ultrafast && .venv/bin/python -I ~/Documents/jobs-manager/backend/glassdoor_jev.py < request.json
+```
+
+**Checked on 12 Oct 2026.** The first live run typed the keyword and the location and picked Romania, which ran the search. It then stopped at the agent's fourth stale "Search", which led to the search-page stop above. The second run took 3 actions, 3 decisions, 54 s and returned 25 jobs, all with descriptions and dates. Through the restarted service, a Glassdoor-only search with AI ranking off took 57 s: 25 fetched, 2 hidden as already applied (Modash, Resourceful Talent Group), 9 shown, all located in Romania and posted within 30 days. `backend/tests/test_glassdoor.py` covers the guard, the request and goal, the URL check, the JobPosting conversion, the subprocess contract and the engine order. The LinkedIn tests now run the shared loop.
 
 ## Options and behavior
 
@@ -208,7 +232,7 @@ The backend tests include the original collector regression suite, preference/el
 
 Record a feature's checks in that feature's own section, and leave test totals out: the suites report their own counts. Parallel branches that each added a note at the top of **Verification**, or updated one shared totals line, kept conflicting in this file.
 
-The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `backend/claude_chat.py` (the Claude page), `backend/linkedin.py` and `backend/linkedin_jev.py` (LinkedIn), `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
+The main implementation is in `lib/`, `backend/service.py`, `backend/ai_pick.py`, `backend/claude_chat.py` (the Claude page), `backend/linkedin.py` and `backend/linkedin_jev.py` (LinkedIn), `backend/glassdoor.py` and `backend/glassdoor_jev.py` (Glassdoor), `backend/jev.py` and `backend/jev_runner.py` (what the two browser-agent sources share), `android/app/src/main/kotlin/…/` (`MainActivity.kt` and `InstallStatusReceiver.kt`, the update installer; `Downloads.kt`, which saves the CV), and `scripts/`. `pubspec.lock` pins Flutter dependencies. `backend/vendor/` contains self-contained copies of the reference collectors; `backend/config/` contains their configs. No external reference checkout is needed at runtime.
 
 ## Verification (October 9, 2026)
 

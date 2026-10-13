@@ -1051,7 +1051,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                             ),
                             const SizedBox(height: 6),
                             Text(
-                              '${options['adzuna'] ? 'Adzuna + ' : ''}${options['linkedin'] == true ? 'LinkedIn + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · ${engineLabel(options['ai_engine'])} picks' : ''}',
+                              '${options['adzuna'] ? 'Adzuna + ' : ''}${options['linkedin'] == true ? 'LinkedIn + ' : ''}${options['glassdoor'] == true ? 'Glassdoor + ' : ''}${plural((options['boards'] as List).length, 'remote board')}${options['prefer_contract'] ? ' · Contracts first' : ''}${options['ai_pick'] == true ? ' · ${engineLabel(options['ai_engine'])} picks' : ''}',
                               style: const TextStyle(color: Color(0xFFCEDBD4)),
                             ),
                             const SizedBox(height: 20),
@@ -1627,7 +1627,7 @@ class _OptionsPageState extends State<OptionsPage> {
       client: widget.httpClient?.call(),
     );
     try {
-      final data = await api.request('/linkedin/usage');
+      final data = await api.request('/jev/usage');
       if (mounted && data['total'] is Map && data['days30'] is Map) {
         setState(() {
           jevUsage = data;
@@ -1705,9 +1705,12 @@ class _OptionsPageState extends State<OptionsPage> {
       final linkedin = health['linkedin_available'] == true
           ? ' LinkedIn agent ready.'
           : ' LinkedIn needs jev-ultrafast on the service.';
+      final glassdoor = health['glassdoor_available'] == true
+          ? ' Glassdoor agent ready.'
+          : ' Glassdoor needs jev-ultrafast on the service.';
       if (mounted) {
         setState(() {
-          connection = adzuna + linkedin;
+          connection = adzuna + linkedin + glassdoor;
         });
       }
     } catch (_) {
@@ -1843,6 +1846,7 @@ class _OptionsPageState extends State<OptionsPage> {
     }
     if (!(o['adzuna'] as bool) &&
         !(o['linkedin'] as bool) &&
+        o['glassdoor'] != true &&
         (o['boards'] as List).isEmpty) {
       setState(() {
         connection = 'Enable at least one job source.';
@@ -2063,6 +2067,11 @@ class _OptionsPageState extends State<OptionsPage> {
             'linkedin',
             'LinkedIn',
             'The jev-ultrafast browser agent searches in the Chrome profile signed in to LinkedIn on your computer. Adds about 30 seconds.',
+          ),
+          toggle(
+            'glassdoor',
+            'Glassdoor',
+            'The same browser agent searches Glassdoor in that Chrome profile, then reads each role\'s page. Adds about a minute.',
           ),
           if (jevUsage != null)
             Padding(

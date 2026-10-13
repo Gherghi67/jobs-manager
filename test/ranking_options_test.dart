@@ -99,7 +99,11 @@ void main() {
   ) async {
     SharedPreferences.setMockInitialValues({
       'token': 'test-token',
-      'options': jsonEncode({'adzuna': false, 'boards': []}),
+      'options': jsonEncode({
+        'adzuna': false,
+        'glassdoor': false,
+        'boards': [],
+      }),
     });
     final requests = <Map<String, dynamic>>[];
     http.Client client() => MockClient((r) async {
@@ -174,6 +178,75 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'the Glassdoor switch reaches the search and counts as a source',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'token': 'test-token',
+        'options': jsonEncode({
+          'adzuna': false,
+          'linkedin': false,
+          'boards': [],
+        }),
+      });
+      final requests = <Map<String, dynamic>>[];
+      http.Client client() => MockClient((r) async {
+        if (r.url.path == '/search') {
+          requests.add(jsonDecode(r.body) as Map<String, dynamic>);
+          return http.Response('{"id":"test"}', 202);
+        }
+        if (r.url.path == '/search/test') {
+          return http.Response(
+            jsonEncode({
+              'status': 'complete',
+              'current': 'Search complete',
+              'fetched': 0,
+              'sources': [],
+              'jobs': [],
+              'updated_at': '2026-10-12T12:00:00Z',
+            }),
+            200,
+          );
+        }
+        return http.Response('{"jobs":[]}', 200);
+      });
+      await tester.pumpWidget(JobsApp(httpClient: client));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Glassdoor + 0 remote boards'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Find opportunities'));
+      await tester.pumpAndSettle();
+      expect(requests.last['glassdoor'], isTrue);
+      expect(requests.last['linkedin'], isFalse);
+      await tester.tap(find.byTooltip('Search options'));
+      await tester.pumpAndSettle();
+      final glassdoor = find.widgetWithText(SwitchListTile, 'Glassdoor');
+      await tester.scrollUntilVisible(
+        glassdoor,
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(tester.widget<SwitchListTile>(glassdoor).value, isTrue);
+      // Centered, clear of the Save options button at the bottom.
+      await Scrollable.ensureVisible(tester.element(glassdoor), alignment: 0.5);
+      await tester.pumpAndSettle();
+      await tester.tap(glassdoor);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save options'));
+      await tester.pumpAndSettle();
+      // Glassdoor was the only source left.
+      await tester.scrollUntilVisible(
+        find.text('Enable at least one job source.'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('Your search options'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('every Adzuna market can be selected at once', (tester) async {
     SharedPreferences.setMockInitialValues({
       'token': 'test-token',
@@ -232,11 +305,12 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  test('the Jev usage line prices the last search and the periods', () {
+  test('the Jev usage line prices the last run and the periods', () {
     expect(
       jevUsageText({
         'price_per_million_input': 0.042,
         'last': {
+          'source': 'glassdoor',
           'requests': 14,
           'input_tokens': 42100,
           'cost': 0.00177,
@@ -247,15 +321,16 @@ void main() {
         'days30': {'runs': 6, 'cost': 0.0112},
         'total': {'runs': 1, 'cost': 0.25},
       }),
-      r'Jev usage, last search: 14 requests, 42.1k input tokens, $0.0018. '
-      r'Last 30 days: 6 searches, $0.011. All time: 1 search, $0.25. '
+      r'Jev usage, last run (Glassdoor): 14 requests, 42.1k input tokens, '
+      r'$0.0018. Last 30 days: 6 agent runs, $0.011. All time: 1 agent run, '
+      r'$0.25. '
       'Field text: Codex (default model), no dollar cost reported. '
       r'Estimated at $0.042 per million input tokens; '
       'TypeSafe reports tokens, not dollars.',
     );
     expect(
       jevUsageText({'last': null, 'days30': {}, 'total': {}}),
-      'Jev usage: no LinkedIn search has run the agent yet.',
+      'Jev usage: no LinkedIn or Glassdoor search has run the agent yet.',
     );
     expect(dollars(0), r'$0');
     expect(dollars(0.00002), r'under $0.0001');
@@ -263,12 +338,12 @@ void main() {
     expect(tokenCount(1250000), '1.3M');
   });
 
-  testWidgets('search options show the Jev usage under LinkedIn', (
+  testWidgets('search options show the Jev usage under the agent switches', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({'token': 'test-token'});
     http.Client client() => MockClient((r) async {
-      if (r.url.path == '/linkedin/usage') {
+      if (r.url.path == '/jev/usage') {
         return http.Response(
           jsonEncode({
             'price_per_million_input': 0.042,
@@ -285,7 +360,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Search options'));
     await tester.pumpAndSettle();
-    final line = find.textContaining('Jev usage, last search: 9 requests');
+    final line = find.textContaining('Jev usage, last run: 9 requests');
     await tester.scrollUntilVisible(
       line,
       250,
