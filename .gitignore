@@ -70,3 +70,4 @@ backend/gmail-sync-config.json
 backend/gmail-sync-state.json*
 backend/gmail-sync-preview.json
 backend/jev-usage.json*
+backend/search.json*

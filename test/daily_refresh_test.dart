@@ -73,7 +73,11 @@ void main() {
     await tester.pumpWidget(
       JobsApp(
         httpClient: () => MockClient((request) async {
-          requests++;
+          // Launch also asks for the service's latest search, which isn't
+          // an analytics fetch.
+          if (request.url.path != '/search/latest') {
+            requests++;
+          }
           return http.Response('{"jobs": []}', 200);
         }),
       ),

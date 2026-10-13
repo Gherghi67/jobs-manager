@@ -442,7 +442,8 @@ void main() {
     });
     await tester.pumpWidget(JobsApp(httpClient: () => client));
     await tester.pumpAndSettle();
-    expect(calls, ['GET /applied']);
+    // At launch the app also shows the service's latest search.
+    expect(calls, unorderedEquals(['GET /search/latest', 'GET /applied']));
     await tester.scrollUntilVisible(
       find.byTooltip('Mark as applied'),
       220,

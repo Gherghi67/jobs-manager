@@ -167,7 +167,7 @@ class EngineTests(unittest.TestCase):
 
     def run_search(self, fetch, **options):
         o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, **options})
-        def linkedin_fetch(o, job, record=None):
+        def linkedin_fetch(o, job, record=None, runner=None):
             record(dict(requests=2, input_tokens=9000))
             return [], []
         with patch.object(linkedin, 'enabled', return_value=True), patch.object(linkedin, 'fetch', linkedin_fetch), \
@@ -177,7 +177,7 @@ class EngineTests(unittest.TestCase):
         return self.engine.get('x')
 
     def test_glassdoor_runs_after_linkedin_and_its_roles_are_ranked(self):
-        def fetch(o, job, record=None):
+        def fetch(o, job, record=None, runner=None):
             record(dict(requests=3, input_tokens=15000, source='glassdoor'))
             return glassdoor.to_jobs([item()], job), []
         result = self.run_search(fetch)
@@ -187,12 +187,12 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((usage['last']['source'], usage['total']['runs'], usage['total']['requests']), ('glassdoor', 2, 5))
 
     def test_errors_keep_their_message_and_the_switch_works(self):
-        def fail(o, job, record=None):
+        def fail(o, job, record=None, runner=None):
             raise glassdoor.GlassdoorError('No open Chrome profile is signed in to LinkedIn.')
         result = self.run_search(fail)
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(result['sources'][2]['message'], 'No open Chrome profile is signed in to LinkedIn.')
-        def never(o, job, record=None):
+        def never(o, job, record=None, runner=None):
             raise AssertionError('Glassdoor should not run')
         result = self.run_search(never, glassdoor=False)
         self.assertEqual([x['name'] for x in result['sources']], ['remotive', 'linkedin'])

@@ -152,11 +152,11 @@ def to_jobs(items, job):
     return rows
 
 
-def fetch(o, job, record=None):
+def fetch(o, job, record=None, runner=None):
     """Returns (jobs, warnings) like the other collectors, or raises GlassdoorError.
-    record receives the run's usage, also when the run failed after the agent started."""
+    record receives the run's usage, also when the run failed after the agent started. runner replaces subprocess.run."""
     if not enabled():
         raise GlassdoorError(f'Glassdoor needs jev-ultrafast installed at {JEV_DIR}.')
     req = request(o)
-    items, warnings = jev.run(NAME, RUNNER, GlassdoorError, req, goal(req), record)
+    items, warnings = jev.run(NAME, RUNNER, GlassdoorError, req, goal(req), record, runner)
     return to_jobs(items, job), warnings

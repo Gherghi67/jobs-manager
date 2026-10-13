@@ -85,12 +85,13 @@ def usage_of(state):
                 text_cost=round(sum(costs), 8) if costs else None)
 
 
-def run(name, runner, error, req, goal, record=None):
+def run(name, runner, error, req, goal, record=None, launch=None):
     """Runs a site's runner with the request and the agent's goal. Returns (job items, warnings) or raises error.
-    record receives the run's usage, tagged with the site, also when the run failed after the agent started."""
+    record receives the run's usage, tagged with the site, also when the run failed after the agent started.
+    launch replaces subprocess.run; the service passes one that a cancelled search interrupts."""
     try:
-        done = subprocess.run([str(python()), '-I', str(runner)], input=json.dumps(dict(req, goal=goal)),
-                              capture_output=True, text=True, timeout=TIMEOUT, cwd=JEV_DIR, env=child_env())
+        done = (launch or subprocess.run)([str(python()), '-I', str(runner)], input=json.dumps(dict(req, goal=goal)),
+                                          capture_output=True, text=True, timeout=TIMEOUT, cwd=JEV_DIR, env=child_env())
     except subprocess.TimeoutExpired:
         raise error(f'The {name} browser agent did not finish in time.') from None
     try:

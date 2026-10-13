@@ -250,7 +250,7 @@ class EngineTests(unittest.TestCase):
         o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
         engine.runs['x'] = {}
         seen = []
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             seen.extend(j['company'] for j in jobs)
             return jobs, dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
         with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job(), job(company='Fresh', url='https://example.com/fresh')]}), patch.object(s.ai, 'pick', pick):
@@ -265,7 +265,7 @@ class EngineTests(unittest.TestCase):
         engine.applied.add({'scope': 'company', 'company': 'Studio', 'match': 'badge'})
         o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
         engine.runs['x'] = {}
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             # Claude puts the badged role first; the service moves it back down.
             return sorted(jobs, key=lambda j: j['company'] != 'Studio'), dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
         with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job(), job(company='Fresh', url='https://example.com/fresh')]}), patch.object(s.ai, 'pick', pick):
@@ -281,7 +281,7 @@ class EngineTests(unittest.TestCase):
         o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
         engine.runs['x'] = {}
         seen = []
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             seen.extend(j['company'] for j in jobs)
             return jobs, dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
         rows = [job(), job(company='Fresh', url='https://example.com/fresh')]
@@ -326,6 +326,136 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(cached)
         self.assertEqual(len(second), 1)
         self.assertEqual(len(calls), 1)
+
+    def results(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        return s.SearchResults(Path(folder.name) / 'search.json')
+
+    def test_a_finished_search_is_kept_for_every_device_and_a_restart(self):
+        engine = s.Engine(self.store(), results=self.results())
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False})
+        engine.runs['x'] = dict(status='running')
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job()]}):
+            engine.run('x', o)
+        latest = engine.latest()
+        self.assertIsNone(latest['running'])
+        self.assertEqual((latest['results']['id'], latest['results']['status']), ('x', 'complete'))
+        self.assertEqual([j['company'] for j in latest['results']['jobs']], ['Studio'])
+        path = engine.results.path
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(s.SearchResults(path).get(), latest['results'])
+        # A device that already has this search gets no copy of it.
+        again = engine.latest(latest['updated_at'])
+        self.assertEqual((again['results'], again['updated_at']), (None, latest['updated_at']))
+
+    def test_a_search_where_every_source_failed_keeps_the_previous_results(self):
+        engine = s.Engine(self.store(), results=self.results())
+        engine.results.put({'id': 'before', 'jobs': [job()], 'updated_at': 'then'})
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False})
+        engine.runs['x'] = dict(status='running')
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: (_ for _ in ()).throw(ValueError('down'))}):
+            engine.run('x', o)
+        self.assertEqual(engine.get('x')['status'], 'complete')
+        self.assertEqual(engine.latest()['results']['id'], 'before')
+
+    def test_an_unreadable_results_file_reads_as_no_search(self):
+        results = self.results()
+        results.path.write_text('{not json')
+        self.assertIsNone(results.get())
+
+    def test_cancel_stops_the_search_before_the_next_step(self):
+        engine = s.Engine(self.store(), results=self.results())
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive', 'remoteok']})
+        engine.runs['x'], engine.stops['x'] = dict(status='running'), s.Stop()
+        started, release, called = threading.Event(), threading.Event(), []
+        def slow(*args):
+            started.set()
+            release.wait(5)
+            return [job()]
+        def pick(*args):
+            called.append('pick')
+            return args[0], {}
+        with patch.dict(s.remote.SOURCES, {'remotive': slow, 'remoteok': lambda *a: called.append('remoteok') or []}), \
+                patch.object(s.ai, 'pick', pick):
+            worker = threading.Thread(target=engine.run, args=('x', o))
+            worker.start()
+            self.assertTrue(started.wait(5))
+            self.assertEqual(engine.latest()['running'], 'x')
+            self.assertEqual(engine.cancel('x')['status'], 'cancelled')
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(called, [])
+        run = engine.get('x')
+        self.assertEqual((run['status'], run['current']), ('cancelled', 'Search cancelled'))
+        self.assertEqual(engine.latest(), dict(running=None, updated_at=None, results=None))
+        self.assertTrue(engine.stops['x'].event.is_set())
+
+    def test_cancel_leaves_a_finished_search_and_an_unknown_one_alone(self):
+        engine = s.Engine(self.store())
+        engine.runs['x'] = dict(status='complete', jobs=[])
+        self.assertEqual(engine.cancel('x')['status'], 'complete')
+        self.assertIsNone(engine.cancel('missing'))
+
+    def test_a_new_search_can_start_once_the_running_one_is_cancelled(self):
+        engine = s.Engine(self.store())
+        with patch.object(s.threading, 'Thread'):
+            first = engine.start({'adzuna': False, 'boards': ['remotive']})
+            with self.assertRaises(RuntimeError):
+                engine.start({'adzuna': False, 'boards': ['remoteok']})
+            engine.cancel(first)
+            second = engine.start({'adzuna': False, 'boards': ['remoteok']})
+        self.assertNotEqual(first, second)
+        # The cancelled search's thread stops at its next step instead of writing into the new one.
+        with self.assertRaises(s.Cancelled):
+            engine.update(first, current='Fetching remoteok')
+        self.assertEqual(engine.get(second)['status'], 'running')
+
+
+class StopTests(unittest.TestCase):
+    def run_child(self, code):
+        stop, box = s.Stop(), {}
+        worker = threading.Thread(target=lambda: box.update(done=stop.run([sys.executable, '-c', code],
+                                                                        capture_output=True, text=True, timeout=30)))
+        worker.start()
+        for _ in range(500):
+            if stop.procs:
+                break
+            threading.Event().wait(0.01)
+        # Python needs a moment to install its Ctrl+C handler before the interrupt means KeyboardInterrupt.
+        threading.Event().wait(0.5)
+        began = s.time.monotonic()
+        stop.set()
+        worker.join(15)
+        return box['done'], s.time.monotonic() - began
+
+    def test_setting_it_interrupts_the_child_process_like_ctrl_c(self):
+        done, took = self.run_child('import time\ntry:\n    time.sleep(30)\nfinally:\n    print("tab closed", flush=True)')
+        self.assertLess(took, 5)
+        self.assertNotEqual(done.returncode, 0)
+        # The child's own cleanup ran, as a browser agent's does when it closes its tab.
+        self.assertIn('tab closed', done.stdout)
+
+    def test_a_child_that_ignores_the_interrupt_is_killed(self):
+        with patch.object(s.Stop, 'GRACE', 0.5):
+            done, took = self.run_child('import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\ntime.sleep(30)')
+        self.assertLess(took, 5)
+        self.assertEqual(done.returncode, -s.signal.SIGKILL)
+
+    def test_no_child_starts_once_it_is_set(self):
+        stop = s.Stop()
+        stop.set()
+        with self.assertRaises(s.Cancelled):
+            stop.run([sys.executable, '-c', 'pass'])
+
+    def test_it_runs_like_subprocess_run(self):
+        done = s.Stop().run([sys.executable, '-c', 'import sys; print(sys.stdin.read().upper())'], input='ok',
+                            capture_output=True, text=True, timeout=30)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, 'OK'))
+        with self.assertRaises(s.subprocess.TimeoutExpired):
+            s.Stop().run([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=0.5)
+
 
 class ApiTests(unittest.TestCase):
     @classmethod
@@ -410,6 +540,23 @@ class ApiTests(unittest.TestCase):
             catalog.assert_not_called()
             self.assertEqual(self.call('GET', '/ranking/accounts'), {'accounts': rows})
 
+    def test_latest_search_and_cancel_endpoints(self):
+        self.assertEqual(self.call('GET', '/search/latest'), dict(running=None, updated_at=None, results=None))
+        s.Handler.engine.runs = {'run': dict(status='running', jobs=[])}
+        self.assertEqual(self.call('GET', '/search/latest')['running'], 'run')
+        self.assertEqual(self.call('POST', '/search/run/cancel')['status'], 'cancelled')
+        self.assertIsNone(self.call('GET', '/search/latest')['running'])
+        for method, path, token, code in [('POST', '/search/missing/cancel', True, 404),
+                                          ('POST', '/search/run/cancel', False, 401), ('GET', '/search/latest', False, 401)]:
+            with self.subTest(path=path, token=token), self.assertRaises(HTTPError) as e:
+                self.call(method, path, token=token)
+            self.assertEqual(e.exception.code, code)
+        s.Handler.engine.runs = {}
+        # Timestamps carry +00:00, which the app sends encoded.
+        s.Handler.engine.results.put({'id': 'done', 'jobs': [], 'updated_at': '2026-10-13T09:02:25+00:00'})
+        self.assertEqual(self.call('GET', '/search/latest?have=2026-10-13T09%3A02%3A25%2B00%3A00'),
+                         dict(running=None, updated_at='2026-10-13T09:02:25+00:00', results=None))
+        self.assertEqual(self.call('GET', '/search/latest')['results']['id'], 'done')
     def test_search_accepts_a_full_dismissed_list(self):
         body = dict(s.DEFAULTS, dismissed=[f'{i:024x}' for i in range(s.MAX_DISMISSED)])
         with patch.object(s.Handler.engine, 'start', return_value='run') as start:

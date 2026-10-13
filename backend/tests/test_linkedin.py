@@ -384,12 +384,12 @@ class EngineTests(unittest.TestCase):
         return self.engine.get('x')
 
     def test_linkedin_runs_last_and_its_roles_are_ranked(self):
-        result = self.run_search(lambda o, job, record=None: (linkedin.to_jobs([item()], job), []))
+        result = self.run_search(lambda o, job, record=None, runner=None: (linkedin.to_jobs([item()], job), []))
         self.assertEqual([x['name'] for x in result['sources']], ['remotive', 'linkedin'])
         self.assertEqual([j['source'] for j in result['jobs']], ['linkedin'])
 
     def test_linkedin_errors_keep_their_message(self):
-        def fail(o, job, record=None):
+        def fail(o, job, record=None, runner=None):
             raise linkedin.LinkedInError('No open Chrome profile is signed in to LinkedIn.')
         result = self.run_search(fail)
         self.assertEqual(result['status'], 'complete')
@@ -397,14 +397,14 @@ class EngineTests(unittest.TestCase):
 
     def test_a_search_records_the_agent_usage(self):
         self.engine.jev_usage = s.JevUsage(Path(self.folder.name) / 'jev-usage.json')
-        def fetch(o, job, record=None):
+        def fetch(o, job, record=None, runner=None):
             record(dict(requests=5, input_tokens=15000, output_tokens=1000))
             return [], []
         self.run_search(fetch)
         self.assertEqual(self.engine.jev_usage.summary()['last']['requests'], 5)
 
     def test_switched_off_per_search(self):
-        def never(o, job, record=None):
+        def never(o, job, record=None, runner=None):
             raise AssertionError('LinkedIn should not run')
         result = self.run_search(never, linkedin=False)
         self.assertEqual([x['name'] for x in result['sources']], ['remotive'])

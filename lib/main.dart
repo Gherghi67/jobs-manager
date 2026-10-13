@@ -84,8 +84,9 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       filter = '';
   // The source the results list is narrowed to; empty shows every source.
   String sourceFilter = '';
-  String? error, appliedNote;
+  String? error, appliedNote, notice;
   bool loading = true, busy = false, cached = false, savingCv = false;
+  bool cancelling = false;
   int tab = 0, generation = 0, sourceTotal = 0, appliedHidden = 0;
   int appliedVersion = 0;
   JobsApi? activeApi;
@@ -93,8 +94,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   DateTime? appliedFetchedAt, appliedAttemptAt;
   bool appliedFetching = false;
   Map<String, dynamic> gmailSync = {};
-  // The search the service is running for this app, kept on the phone until
-  // its results arrive so a backgrounded or restarted app collects them.
+  // The service's search this app is following. The service owns searches:
+  // any device can follow, cancel or show them.
   String? searchRun;
   Completer<void>? backOnScreen;
   // One list serves every tab; a new tab starts at its top.
@@ -119,8 +120,10 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       // lost its connection.
       backOnScreen?.complete();
       backOnScreen = null;
-      if (!busy && searchRun != null) {
-        unawaited(collect(searchRun));
+      // A search may have finished, or started on another device, while this
+      // app was away.
+      if (!busy) {
+        unawaited(syncResults());
       }
       unawaited(refreshAppliedIfDue());
     }
@@ -185,11 +188,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       baseUrl = p.getString('url') ?? baseUrl;
       token = p.getString('token') ?? '';
       updated = p.getString('updated') ?? '';
-      searchRun = p.getString('search_run');
     });
-    if (searchRun != null) {
-      unawaited(collect(searchRun));
-    }
+    unawaited(syncResults());
     unawaited(refreshAppliedIfDue());
   }
 
@@ -223,13 +223,84 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     await p.setString('token', token);
   }
 
-  Future<void> rememberRun(String? id) async {
-    searchRun = id;
-    final p = prefs;
-    if (p != null) {
-      await (id == null
-          ? p.remove('search_run')
-          : p.setString('search_run', id));
+  // Shows the service's search: follows the one it is running, or shows the
+  // last one it finished, which every device shares. Searches only start
+  // from Find opportunities, never from a refresh.
+  Future<void> syncResults({bool manual = false, bool full = false}) async {
+    if (busy || loading || token.isEmpty) {
+      return;
+    }
+    final requestedUrl = baseUrl, requestedToken = token;
+    final api = this.api();
+    try {
+      // The service leaves out results this app already shows.
+      final have = full || updated.isEmpty
+          ? ''
+          : '?have=${Uri.encodeQueryComponent(updated)}';
+      final latest = await api.request('/search/latest$have');
+      // A search started, or the service changed, while this was in flight.
+      if (!mounted ||
+          busy ||
+          requestedUrl != baseUrl ||
+          requestedToken != token) {
+        return;
+      }
+      final running = latest['running'], results = latest['results'];
+      if (running is String) {
+        unawaited(collect(running));
+      } else if (results is Map) {
+        setState(() => showResults(Map<String, dynamic>.from(results)));
+        await persist();
+      } else if (latest['updated_at'] != null &&
+          latest['updated_at'] == updated) {
+        setState(() => cached = false);
+      }
+    } catch (e) {
+      if (manual) {
+        notify(
+          'Could not refresh. ${e.toString().replaceFirst('Exception: ', '')}',
+        );
+      }
+    } finally {
+      api.close();
+    }
+  }
+
+  // Call inside setState.
+  void showResults(Map<String, dynamic> result) {
+    jobs = (result['jobs'] as List)
+        .map((j) => Job(Map<String, dynamic>.from(j)))
+        .toList();
+    sources = result['sources'] as List? ?? [];
+    sourceTotal = (result['total'] as num?)?.toInt() ?? 0;
+    updated = result['updated_at'] as String? ?? '';
+    final ai = result['ai'];
+    aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
+    appliedHidden = (result['applied_hidden'] as num?)?.toInt() ?? 0;
+    cached = false;
+    error = null;
+  }
+
+  // The search's own poll sees it cancelled within a couple of seconds and
+  // puts the last finished results back.
+  Future<void> cancelSearch() async {
+    final id = searchRun;
+    if (id == null || cancelling) {
+      return;
+    }
+    setState(() => cancelling = true);
+    final api = this.api();
+    try {
+      await api.request('/search/$id/cancel', method: 'POST');
+    } catch (e) {
+      if (mounted) {
+        setState(() => cancelling = false);
+        notify(
+          'Could not cancel the search. ${e.toString().replaceFirst('Exception: ', '')}',
+        );
+      }
+    } finally {
+      api.close();
     }
   }
 
@@ -257,11 +328,15 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     activeApi = api;
     setState(() {
       busy = true;
+      cancelling = false;
       error = null;
+      notice = null;
+      searchRun = id;
       status = id == null
           ? 'Connecting to your sources…'
           : 'Checking on your search…';
     });
+    var cancelled = false;
     try {
       if (id == null) {
         // The service keeps dismissed roles out of the AI shortlist and lists them last.
@@ -270,7 +345,10 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
           body: {...options, 'dismissed': recentDismissed(dismissed)},
         );
         id = start['id'] as String;
-        await rememberRun(id);
+        if (!mounted || run != generation) {
+          return;
+        }
+        setState(() => searchRun = id);
       }
       final deadline = DateTime.now().add(const Duration(minutes: 20));
       var misses = 0;
@@ -308,6 +386,11 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
           sources = result['sources'] as List;
           sourceTotal = (result['total'] as num?)?.toInt() ?? 0;
         });
+        // Cancelled here or on another device.
+        if (result['status'] == 'cancelled') {
+          cancelled = true;
+          break;
+        }
         if (result['status'] == 'error') {
           throw Exception(result['current']);
         }
@@ -320,17 +403,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
               'All sources failed. Previous results are still available. Check source status below.',
             );
           }
-          setState(() {
-            jobs = (result['jobs'] as List)
-                .map((j) => Job(Map<String, dynamic>.from(j)))
-                .toList();
-            updated = result['updated_at'] as String;
-            final ai = result['ai'];
-            aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
-            appliedHidden = (result['applied_hidden'] as num?)?.toInt() ?? 0;
-            cached = false;
-          });
-          await rememberRun(null);
+          setState(() => showResults(result));
           await persist();
           break;
         }
@@ -342,12 +415,9 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
         await Future<void>.delayed(const Duration(seconds: 2));
       }
     } catch (e) {
-      // Only a lost connection leaves the run worth collecting later. A
-      // failed start keeps any earlier run the app still has to collect.
+      // After a lost connection the service carries on, and the next resume
+      // or launch follows the search again.
       final lost = e is ServiceUnavailable;
-      if (!lost && id != null) {
-        await rememberRun(null);
-      }
       if (mounted && run == generation) {
         setState(() {
           error =
@@ -359,7 +429,17 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       if (mounted && run == generation) {
         setState(() {
           busy = false;
+          cancelling = false;
+          searchRun = null;
+          if (cancelled) {
+            notice = 'Search cancelled. The last finished search is shown.';
+          }
         });
+        if (cancelled) {
+          // The poll showed the cancelled search's sources; put the last
+          // finished search's back.
+          unawaited(syncResults(full: true));
+        }
       }
     }
   }
@@ -390,6 +470,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       });
       await persist();
       unawaited(syncApplied());
+      unawaited(syncResults());
     }
   }
 
@@ -973,7 +1054,10 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
         child: loading
             ? const Center(child: CircularProgressIndicator())
             : RefreshIndicator(
-                onRefresh: tab == 2 ? syncApplied : search,
+                // A pull shows the service's results; it never starts a search.
+                onRefresh: tab == 2
+                    ? syncApplied
+                    : () => syncResults(manual: true),
                 child: ListView(
                   controller: listScroll,
                   physics: const AlwaysScrollableScrollPhysics(),
@@ -1082,8 +1166,30 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                         const SizedBox(height: 16),
                         const LinearProgressIndicator(),
                         const SizedBox(height: 8),
-                        Text(status),
+                        Row(
+                          children: [
+                            Expanded(child: Text(status)),
+                            const SizedBox(width: 8),
+                            TextButton.icon(
+                              onPressed: searchRun == null || cancelling
+                                  ? null
+                                  : cancelSearch,
+                              icon: const Icon(Icons.close),
+                              label: Text(
+                                cancelling ? 'Cancelling…' : 'Cancel search',
+                              ),
+                            ),
+                          ],
+                        ),
                       ],
+                      if (notice != null && !busy)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: Text(
+                            notice!,
+                            style: const TextStyle(color: Color(0xFF63716D)),
+                          ),
+                        ),
                       if (error != null)
                         Padding(
                           padding: const EdgeInsets.only(top: 16),

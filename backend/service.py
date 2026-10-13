@@ -1,6 +1,7 @@
 """Personal job-search API; collectors are vendored from cv-refactor."""
 from __future__ import annotations
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import hashlib
@@ -12,6 +13,8 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -25,6 +28,7 @@ WEB_DIR = ROOT.parent / 'build' / 'web'
 CV_DIR = Path(os.environ.get('JOBS_CV_DIR') or ROOT.parent / 'cv')
 APPLIED_FILE = Path(os.environ.get('JOBS_APPLIED_FILE') or ROOT / 'applied.json')
 JEV_USAGE_FILE = Path(os.environ.get('JOBS_JEV_USAGE_FILE') or ROOT / 'jev-usage.json')
+SEARCH_FILE = Path(os.environ.get('JOBS_SEARCH_FILE') or ROOT / 'search.json')
 # US dollars per million Jev input tokens; output is free. TypeSafe's docs publish no price and its responses
 # carry tokens only, so this is the rate third-party listings gave in October 2026. JOBS_JEV_PRICE overrides it.
 JEV_PRICE = 0.042
@@ -525,14 +529,102 @@ class JevUsage:
                     total=self.priced(self.sum([data['total']])))
 
 
+class Cancelled(Exception):
+    """The search was cancelled, or a newer search replaced it."""
+
+
+class Stop:
+    """A search's cancel switch. Setting it interrupts the child process the search is waiting on (a browser
+    agent or a ranking call) the way Ctrl+C would, so a browser agent still closes its tab and reports its usage."""
+    GRACE = 10
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.procs = set()
+
+    def set(self):
+        with self.lock:
+            self.event.set()
+            procs = list(self.procs)
+        for proc in procs:
+            with contextlib.suppress(OSError):
+                proc.send_signal(signal.SIGINT)
+            # Killed only if it ignores the interrupt; kill() does nothing once the process has exited.
+            timer = threading.Timer(self.GRACE, proc.kill)
+            timer.daemon = True
+            timer.start()
+
+    def run(self, cmd, input=None, capture_output=False, timeout=None, **kwargs):
+        """subprocess.run for a search's child processes."""
+        if capture_output:
+            kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with self.lock:
+            if self.event.is_set():
+                raise Cancelled()
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if input is not None else None, **kwargs)
+            self.procs.add(proc)
+        try:
+            with proc:
+                try:
+                    out, err = proc.communicate(input, timeout=timeout)
+                except BaseException:
+                    proc.kill()
+                    proc.wait()
+                    raise
+        finally:
+            with self.lock:
+                self.procs.discard(proc)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+class SearchResults:
+    """The last finished search, kept on the service so every device shows the same roles and a restart keeps them.
+    Without a path it lives in memory only."""
+    def __init__(self, path=None):
+        self.path = Path(path) if path else None
+        self.lock = threading.Lock()
+        self.data = None
+        self.read = self.path is None
+
+    def get(self):
+        with self.lock:
+            if not self.read:
+                self.read = True
+                try:
+                    data = json.loads(self.path.read_text())
+                    self.data = data if isinstance(data, dict) and isinstance(data.get('jobs'), list) else None
+                except (OSError, ValueError):
+                    # Only a copy of a search's results: the next search replaces an unreadable file.
+                    self.data = None
+            return copy.deepcopy(self.data)
+
+    def put(self, run):
+        """Never raises: the search still finished when its file can't be written."""
+        with self.lock:
+            self.data, self.read = copy.deepcopy(run), True
+            if not self.path:
+                return
+            try:
+                temp = self.path.with_name(self.path.name + '.tmp')
+                with os.fdopen(os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600), 'w') as f:
+                    json.dump(run, f)
+                os.replace(temp, self.path)
+            except OSError as exc:
+                print(f'Could not save the search results: {exc}', file=sys.stderr)
+
+
 class Engine:
-    def __init__(self, applied=None, jev_usage=None):
+    def __init__(self, applied=None, jev_usage=None, results=None):
         self.lock = threading.Lock()
         self.runs = {}
+        self.stops = {}
         self.cache = {}
         self.ai_cache = {}
         self.applied = applied or AppliedStore(APPLIED_FILE)
         self.jev_usage = jev_usage or JevUsage(JEV_USAGE_FILE, jev_price())
+        # The service passes SEARCH_FILE; without it (tests) results stay in memory.
+        self.results = results or SearchResults()
 
     def start(self, options):
         o = validate_options(options)
@@ -546,6 +638,7 @@ class Engine:
                     raise RuntimeError('A search is already running. Wait for it to finish.')
             run_id = secrets.token_hex(12)
             self.runs = {run_id: dict(status='running', options=o, jobs=[], sources=[], current='Starting search', fetched=0, applied_hidden=0)}
+            self.stops = {run_id: Stop()}
         threading.Thread(target=self.run, args=(run_id, o, dismissed), daemon=True).start()
         return run_id
 
@@ -553,9 +646,37 @@ class Engine:
         with self.lock:
             return copy.deepcopy(self.runs.get(key))
 
+    def latest(self, have=None):
+        """What a device shows: the search running now, if any, and the last finished one.
+        results is left out when the device already has the search finished at `have`."""
+        with self.lock:
+            running = next((key for key, run in self.runs.items() if run['status'] == 'running'), None)
+        results = self.results.get()
+        updated_at = results.get('updated_at') if results else None
+        return dict(running=running, updated_at=updated_at, results=None if have and have == updated_at else results)
+
+    def cancel(self, key):
+        """Returns the run, or None when the service no longer has it. Only a running search changes."""
+        with self.lock:
+            run = self.runs.get(key)
+            if run is None:
+                return None
+            if run['status'] == 'running':
+                run.update(status='cancelled', current='Search cancelled')
+                stop = self.stops.get(key)
+                if stop:
+                    stop.set()
+            return copy.deepcopy(run)
+
     def update(self, key, **fields):
         with self.lock:
-            self.runs[key].update(fields)
+            run = self.runs.get(key)
+            # A cancelled search stops at its next step, and so does one a newer search replaced.
+            if run is None or run.get('status') == 'cancelled':
+                raise Cancelled()
+            run.update(fields)
+            # Only this search's thread changes the run once it stops running, so callers may copy it later.
+            return run
 
     def cached(self, key, fetch):
         entry = self.cache.get(key)
@@ -596,6 +717,7 @@ class Engine:
 
     def run(self, key, o, dismissed=frozenset()):
         raw, statuses, jobs, set_aside = [], [], [], []
+        stop = self.stops.get(key) or Stop()
         try:
             c = search_config(o)
             plans = [('adzuna', None)] if o['adzuna'] else []
@@ -617,7 +739,8 @@ class Engine:
                     elif name in ('linkedin', 'glassdoor'):
                         site = linkedin if name == 'linkedin' else glassdoor
                         cache_key = json.dumps([name, site.request(o)], sort_keys=True)
-                        (rows, warnings), cached = self.cached(cache_key, lambda: site.fetch(o, remote.job, record=self.jev_usage.add))
+                        (rows, warnings), cached = self.cached(
+                            cache_key, lambda: site.fetch(o, remote.job, record=self.jev_usage.add, runner=stop.run))
                     else:
                         options = copy.deepcopy(options)
                         if name == 'himalayas':
@@ -653,7 +776,7 @@ class Engine:
                 self.update(key, current=f'{label} is ranking {count} role{"" if count == 1 else "s"}', source=None)
                 try:
                     # Work on a copy: polling threads deep-copy the published run state.
-                    jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache)
+                    jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache, stop.run)
                     # Roles at companies already applied to stay below the rest, even when Claude ranked them.
                     jobs.sort(key=lambda j: 'applied_badge' in j)
                 except ai.AIError as exc:
@@ -662,9 +785,17 @@ class Engine:
                     status = dict(status='error', engine=o['ai_engine'], subscription=o['ai_subscription'],
                                   message=f'{type(exc).__name__}: {label} ranking failed; keyword ranking shown.')
                 self.update(key, jobs=jobs + set_aside, ai=status)
-            self.update(key, status='complete', current='Search complete', updated_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            finished = self.update(key, status='complete', current='Search complete',
+                                   updated_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            # Every device shows these until the next search finishes. When every source failed, the app keeps the
+            # previous results, so the service does too.
+            if not statuses or any(s['status'] != 'error' for s in statuses):
+                self.results.put(dict(finished, id=key))
+        except Cancelled:
+            pass
         except Exception:
-            self.update(key, status='error', current='Search failed. Please retry.')
+            with contextlib.suppress(Cancelled):
+                self.update(key, status='error', current='Search failed. Please retry.')
 
 
 def app_release():
@@ -706,7 +837,7 @@ def download_name(path):
 
 
 class Handler(BaseHTTPRequestHandler):
-    engine = Engine()
+    engine = Engine(results=SearchResults(SEARCH_FILE))
     chats = claude_chat.ChatStore()
     gmail = None
     token = ''
@@ -790,6 +921,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_file(cv, 'application/pdf', missing, f'attachment; filename="{download_name(cv)}"')
         elif path.startswith('/claude/'):
             self.claude('GET', path)
+        elif path == '/search/latest':
+            have = parse_qs(urlparse(self.path).query).get('have', [''])[0]
+            self.respond(200, self.engine.latest(have))
         elif path.startswith('/search/'):
             run = self.engine.get(path.rsplit('/', 1)[1])
             self.respond(200 if run else 404, run or {'error': 'Search expired. Start a new search.'})
@@ -823,6 +957,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(202, self.gmail.status())
         if path.startswith('/claude/'):
             return self.claude('POST', path)
+        parts = path.strip('/').split('/')
+        if len(parts) == 3 and parts[0] == 'search' and parts[2] == 'cancel':
+            run = self.engine.cancel(parts[1])
+            return self.respond(200 if run else 404, run or {'error': 'Search expired. Start a new search.'})
         if path not in ('/search', '/applied'):
             return self.respond(404, {'error': 'Not found'})
         try:

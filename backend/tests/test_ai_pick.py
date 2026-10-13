@@ -190,7 +190,7 @@ class EngineAiTests(unittest.TestCase):
         return engine.get('x')
 
     def test_ranking_is_attached_to_the_run(self):
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             jobs[0]['ai'] = dict(fit=88, verdict='apply', romania='yes', reasons=[], concerns=[])
             return jobs, dict(status='ok', ranked=1)
         result = self.run_engine(pick)
@@ -199,7 +199,7 @@ class EngineAiTests(unittest.TestCase):
         self.assertEqual(result['ai'], dict(status='ok', ranked=1))
 
     def test_claude_failure_keeps_keyword_results(self):
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             raise ai.AIError('Claude Code: usage limit reached')
         result = self.run_engine(pick)
         self.assertEqual(result['status'], 'complete')
@@ -208,14 +208,14 @@ class EngineAiTests(unittest.TestCase):
         self.assertEqual(result['ai'], dict(status='error', engine='claude', subscription='personal', message='Claude Code: usage limit reached'))
 
     def test_unexpected_failure_is_not_leaked(self):
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             raise KeyError('/Users/me/secret-path')
         result = self.run_engine(pick)
         self.assertEqual(result['status'], 'complete')
         self.assertNotIn('secret-path', json.dumps(result))
 
     def test_ai_pick_off_skips_claude(self):
-        def pick(jobs, o, cache):
+        def pick(jobs, o, cache, runner=None):
             raise AssertionError('Claude should not be called')
         result = self.run_engine(pick, ai_pick=False)
         self.assertEqual(len(result['jobs']), 1)
