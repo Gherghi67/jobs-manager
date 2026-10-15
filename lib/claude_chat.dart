@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api.dart';
 import 'adaptive.dart';
 import 'applications.dart' show shortDate;
+import 'paste.dart';
 
 const _ink = Color(0xFF172C2A);
 const _accent = Color(0xFF146B57);
@@ -31,6 +33,11 @@ typedef Photo = ({Uint8List bytes, String name});
 typedef PhotoPicker = Future<List<Photo>> Function({
   required bool camera,
   required int limit,
+});
+// Starts listening for pasted images and returns a function that stops it.
+typedef PasteListener = void Function() Function(
+  void Function(Future<List<Photo>> photos) onPaste, {
+  required int maxBytes,
 });
 
 // Picks photos from the phone, shrunk so uploads stay small and within Claude's limits.
@@ -135,7 +142,13 @@ List<({String text, bool code})> replyParts(String text) {
 class ClaudePage extends StatefulWidget {
   final JobsApi Function() api;
   final PhotoPicker pick;
-  const ClaudePage({super.key, required this.api, this.pick = pickPhotos});
+  final PasteListener pastes;
+  const ClaudePage({
+    super.key,
+    required this.api,
+    this.pick = pickPhotos,
+    this.pastes = listenForPastedImages,
+  });
   @override
   State<ClaudePage> createState() => _ClaudePageState();
 }
@@ -153,6 +166,7 @@ class _ClaudePageState extends State<ClaudePage> {
   String? cwd, error, pollError, model;
   bool loading = true, sending = false;
   Timer? poller;
+  late final void Function() stopPastes;
   // Bumped when another chat opens, so late answers for the old one are dropped.
   int generation = 0;
 
@@ -161,6 +175,7 @@ class _ClaudePageState extends State<ClaudePage> {
   @override
   void initState() {
     super.initState();
+    stopPastes = widget.pastes(pasted, maxBytes: maxPhotoBytes);
     unawaited(load());
   }
 
@@ -168,6 +183,7 @@ class _ClaudePageState extends State<ClaudePage> {
   void dispose() {
     generation++;
     poller?.cancel();
+    stopPastes();
     input.dispose();
     api.close();
     super.dispose();
@@ -339,16 +355,9 @@ class _ClaudePageState extends State<ClaudePage> {
         camera: camera,
         limit: maxPhotos - attached.length,
       );
-      if (!mounted) {
-        return;
+      if (mounted) {
+        add(picked);
       }
-      final fits = picked.where((p) => p.bytes.length <= maxPhotoBytes);
-      setState(() {
-        error = fits.length < picked.length
-            ? 'Photos over ${maxPhotoBytes ~/ 1000000} MB were left out.'
-            : null;
-        attached = [...attached, ...fits].take(maxPhotos).toList();
-      });
     } on PlatformException catch (e) {
       if (mounted) {
         setState(() {
@@ -356,6 +365,40 @@ class _ClaudePageState extends State<ClaudePage> {
         });
       }
     }
+  }
+
+  // Images pasted into the page, such as a screenshot, on the web.
+  Future<void> pasted(Future<List<Photo>> photos) async {
+    // A send in flight clears the photos when it finishes, so a paste would be lost.
+    if (sending || (chat == null && cwd == null)) {
+      return;
+    }
+    try {
+      final pasted = await photos;
+      if (mounted) {
+        add(pasted);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          error = 'The pasted image could not be read.';
+        });
+      }
+    }
+  }
+
+  // Adds photos to the next message, within the service's limits.
+  void add(List<Photo> photos) {
+    final fits = photos.where((p) => p.bytes.length <= maxPhotoBytes).toList();
+    final room = maxPhotos - attached.length;
+    setState(() {
+      error = fits.length < photos.length
+          ? 'Photos over ${maxPhotoBytes ~/ 1000000} MB were left out.'
+          : fits.length > room
+          ? 'A message takes up to $maxPhotos photos.'
+          : null;
+      attached = [...attached, ...fits.take(room)];
+    });
   }
 
   // A sent photo, fetched from the service the first time it shows.
@@ -620,9 +663,9 @@ class _ClaudePageState extends State<ClaudePage> {
         ),
       ),
       const SizedBox(height: 8),
-      const Text(
-        'Claude Code on the computer that runs your service, with your settings, files and connectors. Add photos with the photo button. Auto mode blocks risky actions, and anything that needs approval is refused.',
-        style: TextStyle(color: _muted, fontSize: 15),
+      Text(
+        'Claude Code on the computer that runs your service, with your settings, files and connectors. Add photos with the photo button${kIsWeb ? ', or paste a screenshot into the message box' : ''}. Auto mode blocks risky actions, and anything that needs approval is refused.',
+        style: const TextStyle(color: _muted, fontSize: 15),
       ),
       if (model?.isNotEmpty == true) ...[
         const SizedBox(height: 8),

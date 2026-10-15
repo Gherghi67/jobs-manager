@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:jobs_manager/api.dart';
 import 'package:jobs_manager/claude_chat.dart';
 import 'package:jobs_manager/main.dart';
+import 'package:jobs_manager/paste.dart';
 
 const documents = '/Users/me/Documents';
 const project = '/Users/me/Documents/jobs-manager';
@@ -42,10 +43,15 @@ final pixel = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
 );
 
-Widget page(http.Client client, {PhotoPicker pick = pickPhotos}) => MaterialApp(
+Widget page(
+  http.Client client, {
+  PhotoPicker pick = pickPhotos,
+  PasteListener pastes = listenForPastedImages,
+}) => MaterialApp(
   home: ClaudePage(
     api: () => JobsApi('https://mac.example.ts.net', 'token', client: client),
     pick: pick,
+    pastes: pastes,
   ),
 );
 
@@ -364,6 +370,89 @@ void main() {
     // The photo just sent shows from the phone's copy.
     expect(gets, isNot(contains('/claude/chats/c1/images/1-1.png')));
     expect(find.byType(Image), findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pasted images join the next message', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final posts = <Map<String, dynamic>>[];
+    void Function(Future<List<Photo>>)? paste;
+    int? limit;
+    var stopped = false;
+    void Function() listen(
+      void Function(Future<List<Photo>>) onPaste, {
+      required int maxBytes,
+    }) {
+      paste = onPaste;
+      limit = maxBytes;
+      return () => stopped = true;
+    }
+
+    final client = MockClient(
+      (r) async => switch ((r.method, r.url.path)) {
+        (_, '/claude/folders') => http.Response(jsonEncode(folders()), 200),
+        ('GET', '/claude/chats') => http.Response(
+          jsonEncode({'chats': []}),
+          200,
+        ),
+        ('POST', '/claude/chats') => () {
+          posts.add(jsonDecode(r.body) as Map<String, dynamic>);
+          return http.Response(
+            jsonEncode({
+              'chat': chatJson(
+                turns: [
+                  {
+                    'prompt': 'What is this?',
+                    'status': 'done',
+                    'images': [
+                      {'name': '0-1.png', 'type': 'image/png'},
+                    ],
+                    'items': [],
+                  },
+                ],
+              ),
+            }),
+            202,
+          );
+        }(),
+        _ => http.Response(jsonEncode({'error': 'Not found'}), 404),
+      },
+    );
+    await tester.pumpWidget(page(client, pastes: listen));
+    await tester.pumpAndSettle();
+    expect(limit, maxPhotoBytes);
+
+    paste!(Future.value([(bytes: pixel, name: 'shot.png')]));
+    await tester.pumpAndSettle();
+    expect(find.bySemanticsLabel('Remove shot.png'), findsOneWidget);
+
+    // Past five, the rest are left out with a note.
+    paste!(
+      Future.value([
+        for (var i = 0; i < maxPhotos; i++) (bytes: pixel, name: 'more$i.png'),
+      ]),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('A message takes up to 5 photos.'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('^Remove ')), findsNWidgets(maxPhotos));
+    expect(find.bySemanticsLabel('Remove more4.png'), findsNothing);
+
+    paste!(Future.error(Exception('Not an image')));
+    await tester.pumpAndSettle();
+    expect(find.text('The pasted image could not be read.'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('^Remove ')), findsNWidgets(maxPhotos));
+
+    await tester.enterText(find.byType(TextField), 'What is this?');
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+    expect(posts.single['images'], [
+      for (var i = 0; i < maxPhotos; i++) base64Encode(pixel),
+    ]);
+    expect(find.bySemanticsLabel(RegExp('^Remove ')), findsNothing);
+
+    // Leaving the page stops listening.
+    await tester.pumpWidget(const SizedBox());
+    expect(stopped, isTrue);
     expect(tester.takeException(), isNull);
   });
 
