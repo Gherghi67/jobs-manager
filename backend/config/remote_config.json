@@ -13,13 +13,6 @@
     },
     "jobicy": {"tags": ["nodejs", "node", "typescript", "backend"], "count": 100},
     "workingnomads": {},
-    "weworkremotely": {
-      "feeds": [
-        "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
-        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
-        "https://weworkremotely.com/remote-jobs.rss"
-      ]
-    },
     "arbeitnow": {"pages": 4},
     "hackernews": {}
   },

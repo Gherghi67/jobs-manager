@@ -158,7 +158,11 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
         ...defaultOptions(),
         ...jsonDecode(p.getString('options') ?? '{}') as Map<String, dynamic>,
       };
-      saved = Map<String, dynamic>.from(
+      // Drops boards removed since these options were saved.
+      options['boards'] = (options['boards'] as List)
+          .where(boardNames.containsKey)
+          .toList();
+      saved =Map<String, dynamic>.from(
         jsonDecode(p.getString('saved') ?? '{}'),
       );
       dismissed = (p.getStringList('dismissed') ?? []).toSet();

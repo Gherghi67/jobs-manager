@@ -42,7 +42,9 @@ import gmail_sync
 import jev
 import linkedin
 
-PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'weworkremotely', 'arbeitnow', 'hackernews']
+PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'arbeitnow', 'hackernews']
+# Removed boards that options saved by older app builds may still list.
+RETIRED_BOARDS = ('weworkremotely',)
 # The markets the app offers. All eight with the broad preset's 4 queries make 32 calls at 2.5 s apart.
 ADZUNA_MARKETS = ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr')
 DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, glassdoor=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
@@ -70,6 +72,8 @@ def validate_options(value):
     for key in ('adzuna', 'linkedin', 'glassdoor', 'remote_only', 'contract_only', 'prefer_contract', 'ai_pick'):
         if type(o[key]) is not bool:
             raise ValueError(f'{key} must be true or false.')
+    if isinstance(o['boards'], list):
+        o['boards'] = [x for x in o['boards'] if x not in RETIRED_BOARDS]
     if not isinstance(o['boards'], list) or any(x not in PUBLIC_SOURCES for x in o['boards']):
         raise ValueError('Unknown remote board.')
     countries = o['countries']

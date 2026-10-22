@@ -66,6 +66,14 @@ class RankingTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 s.validate_options(options)
 
+    def test_we_work_remotely_is_no_longer_searched(self):
+        # Older app builds still send it in their saved options.
+        self.assertEqual(s.validate_options({'boards': ['remotive', 'weworkremotely']})['boards'], ['remotive'])
+        self.assertNotIn('weworkremotely', s.DEFAULTS['boards'])
+        # The gaming preset searches every non-public config source as a studio board.
+        for name in ('remote_config.json', 'broad_remote_config.json', 'gaming_config.json'):
+            self.assertNotIn('weworkremotely', s.config(name)['sources'])
+
     def test_every_adzuna_market_can_be_searched_once(self):
         markets = ['us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr']
         self.assertEqual(s.validate_options({'countries': markets})['countries'], markets)

@@ -113,8 +113,9 @@ void main() {
         {'name': 'adzuna', 'status': 'ok', 'count': 1, 'cached': false},
         {'name': 'remotive', 'status': 'ok', 'count': 34, 'cached': false},
       ]),
+      // We Work Remotely was removed; options saved before that drop it.
       'options': jsonEncode({
-        'boards': ['remotive'],
+        'boards': ['remotive', 'weworkremotely'],
       }),
       'updated': '2026-10-09T10:00:00Z',
     });

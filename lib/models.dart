@@ -4,7 +4,6 @@ const boardNames = <String, String>{
   'himalayas': 'Himalayas',
   'jobicy': 'Jobicy',
   'workingnomads': 'Working Nomads',
-  'weworkremotely': 'We Work Remotely',
   'arbeitnow': 'Arbeitnow',
   'hackernews': 'Hacker News',
 };
@@ -16,6 +15,8 @@ const sourceNames = <String, String>{
   'linkedin': 'LinkedIn',
   'glassdoor': 'Glassdoor',
   ...boardNames,
+  // A removed board; saved and applied roles may still come from it.
+  'weworkremotely': 'We Work Remotely',
   'greenhouse': 'Greenhouse',
   'lever': 'Lever',
   'ashby': 'Ashby',
