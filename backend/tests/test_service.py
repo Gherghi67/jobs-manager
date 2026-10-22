@@ -121,6 +121,21 @@ class AppliedTests(unittest.TestCase):
         self.assertEqual([j['company'] for j in kept], ['Another'])
         self.assertEqual(hidden, 3)
 
+    def test_reposted_role_counts_as_the_company_it_was_posted_for(self):
+        # LinkedIn, 22 Oct: an applied SoftServe role came back as Undelucram.ro's repost of it.
+        self.store.add(dict(self.job, company='SoftServe', title='Senior JS Full Stack Engineer'))
+        self.store.add({'scope': 'company', 'company': 'Proxify AB', 'applied_at': '2026-10-07T18:10:28Z', 'match': 'badge'})
+        def repost(n, client, poster='Undelucram.ro', title='Senior JS Full Stack Engineer'):
+            row = job(company=poster, title=title, url=f'https://example.com/{n}', description=f'{poster} on behalf of: {client} About The Role')
+            return dict(row, id=str(n), company_key=s.company_key(poster))
+        rows = [repost(1, 'SoftServe'), repost(2, 'softserve inc.', poster='Agency'), repost(3, 'SoftServe', title='Staff Engineer'),
+                repost(4, 'SoftServeX'), dict(repost(5, 'SoftServe'), description='Agency on behalf of: SoftServe'), repost(6, 'Proxify AB')]
+        kept, hidden = self.store.exclude(rows)
+        self.assertEqual(hidden, 2)
+        # Another role at the company, another company, and a description naming another poster stay.
+        self.assertEqual([j['id'] for j in kept], ['3', '4', '5', '6'])
+        self.assertEqual(kept[-1]['applied_badge']['company'], 'Proxify AB')
+
     def test_company_title_needs_a_company(self):
         self.store.add(dict(self.job, company='', url='https://example.com/a'))
         kept, hidden = self.store.exclude([job(company='', url='https://example.com/b')])

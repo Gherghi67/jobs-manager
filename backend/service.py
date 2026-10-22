@@ -262,6 +262,18 @@ def applied_keys(job):
     return keys
 
 
+def reposted_for(job, companies):
+    """The applied company a reposting board names at the start of its description, as in LinkedIn's
+    "Undelucram.ro on behalf of: SoftServe About The Role", or ''. The name runs on into the description,
+    so the longest applied company the text starts with wins."""
+    poster = str(job.get('company') or '').strip()
+    found = poster and re.match(re.escape(poster) + r'\s+on behalf of\b:?\s*(.{1,200})', str(job.get('description') or ''), re.I)
+    if not found:
+        return ''
+    text = company_key(found.group(1))
+    return max((k for k in companies if text == k or text.startswith(k + ' ')), key=len, default='')
+
+
 class AppliedStore:
     """Jobs the user marked as applied, kept on the service so every search leaves them out."""
     def __init__(self, path):
@@ -444,14 +456,24 @@ class AppliedStore:
             records = copy.deepcopy(list(self.load().values()))
         keys = set().union(*(applied_keys(r) for r in records))
         badges = {company_key(r['company']): r for r in records if r.get('scope') == 'company' and r.get('match') == 'badge'}
+        names = {}
+        for r in records:
+            if company_key(r.get('company')):
+                names.setdefault(company_key(r['company']), set()).add(r['company'])
         kept, marked = [], []
         for j in jobs:
             ck = j.get('company_key', '')
             listing = applied_keys(j) | ({'company:' + ck, f'crole:{ck}|{title_key(j.get("title"))}'} if ck else set())
+            # A reposted role also counts as the company it was posted for.
+            client = reposted_for(j, names)
+            if client:
+                listing |= {'company:' + client, f'crole:{client}|{title_key(j.get("title"))}'}
+                listing |= {'role:' + remote.dedupe_key(dict(company=n, title=j['title'])) for n in names[client]}
             if listing & keys:
                 continue
-            if ck in badges:
-                j['applied_badge'] = dict(company=badges[ck]['company'], applied_at=badges[ck]['applied_at'])
+            badge = badges.get(ck) or badges.get(client)
+            if badge:
+                j['applied_badge'] = dict(company=badge['company'], applied_at=badge['applied_at'])
                 marked.append(j)
             else:
                 kept.append(j)
