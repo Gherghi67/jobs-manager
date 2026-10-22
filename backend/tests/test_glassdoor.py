@@ -76,6 +76,13 @@ class ResultCheckTests(unittest.TestCase):
         self.assertEqual(glassdoor.spans('romania-backend-engineer-remote', 'IL.0,7_IN203_KO8,31'),
                          dict(location='romania', keywords='backend engineer remote'))
 
+    def test_keywords_keep_their_case_and_dots(self):
+        # The page the agent reached for the backend preset on 22 Oct 2026.
+        url = 'https://www.glassdoor.com/Job/romania-Node.js-backend-remote-jobs-SRCH_IL.0,7_IN203_KO8,30.htm'
+        req = dict(self.req, query='Node.js backend remote')
+        self.assertEqual(glassdoor.check_results(url, req), [])
+        self.assertTrue(glassdoor.searched(url, req))
+
     def test_other_pages_and_searches_fail(self):
         for url in ('https://www.glassdoor.com/Job/index.htm',
                     'https://www.glassdoor.com/Job/romania-frontend-engineer-jobs-SRCH_IL.0,7_IN203_KO8,25.htm',

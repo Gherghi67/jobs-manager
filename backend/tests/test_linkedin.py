@@ -79,8 +79,22 @@ class ResultCheckTests(unittest.TestCase):
         self.assertEqual(linkedin.check_results(RESULTS.replace('Romania', 'Rom%C3%A2nia'), self.req), [])
         self.assertEqual(linkedin.check_results(RESULTS + '&f_WT=2&currentJobId=1', self.req), [])
 
+    def test_the_search_results_page_passes_and_stops_the_agent(self):
+        # Where LinkedIn moved its job search in Oct 2026. The run starts on the search itself, because a typed
+        # search reuses the account's last location; the location is only in the geoId.
+        self.assertEqual(linkedin.start(self.req), 'https://www.linkedin.com/jobs/search-results/'
+                                                   '?keywords=backend%20engineer%20remote&geoId=106670623')
+        self.assertTrue(linkedin.searched(linkedin.start(self.req), self.req))
+        url = ('https://www.linkedin.com/jobs/search-results/?currentJobId=4480221856'
+               '&keywords=backend%20engineer%20remote&geoId=106670623')
+        self.assertEqual(linkedin.check_results(url, self.req), [])
+        self.assertTrue(linkedin.searched(url, self.req))
+        # The page's own default search, and the right search in another country, are not the requested one.
+        self.assertFalse(linkedin.searched(url.replace('backend%20engineer%20remote', 'jobs'), self.req))
+        self.assertFalse(linkedin.searched(url.replace('106670623', '101282230'), self.req))
+
     def test_unshown_location_is_a_warning(self):
-        url = 'https://www.linkedin.com/jobs/search/?keywords=Backend+Engineer+Remote&geoId=1'
+        url = 'https://www.linkedin.com/jobs/search/?keywords=Backend+Engineer+Remote'
         self.assertEqual(len(linkedin.check_results(url, self.req)), 1)
         self.assertEqual(linkedin.check_results(url, self.req, ['backend engineer remote', 'România']), [])
 
@@ -88,7 +102,8 @@ class ResultCheckTests(unittest.TestCase):
         for url in ('https://www.linkedin.com/jobs/search/?keywords=backend%20engineer&location=Romania',
                     'https://www.linkedin.com/jobs/view/4467450237/', 'https://www.linkedin.com/feed/',
                     'https://evil.example/jobs/search/?keywords=backend%20engineer%20remote',
-                    'https://www.linkedin.com/jobs/search/?keywords=backend%20engineer%20remote&location=Germany'):
+                    'https://www.linkedin.com/jobs/search/?keywords=backend%20engineer%20remote&location=Germany',
+                    'https://www.linkedin.com/jobs/search-results/?keywords=backend%20engineer%20remote&geoId=101282230'):
             with self.assertRaises(linkedin.LinkedInError, msg=url):
                 linkedin.check_results(url, self.req)
 

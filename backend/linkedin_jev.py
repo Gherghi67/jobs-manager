@@ -10,8 +10,11 @@ import jev_runner  # noqa: E402
 import linkedin  # noqa: E402
 
 READ_JOBS = r"""(async ({limit}) => {
-  const ids = [...new Set([...document.querySelectorAll('[data-occludable-job-id],[data-job-id]')]
-    .map(e => e.getAttribute('data-occludable-job-id') || e.getAttribute('data-job-id'))
+  // The /jobs/search-results/ page keys each card as job-card-component-ref-<id>; the older page used data attributes.
+  const ids = [...new Set([...document.querySelectorAll(
+    '[data-occludable-job-id],[data-job-id],[componentkey^="job-card-component-ref-"]')]
+    .map(e => e.getAttribute('data-occludable-job-id') || e.getAttribute('data-job-id') ||
+      e.getAttribute('componentkey').slice('job-card-component-ref-'.length))
     .filter(id => /^\d{5,20}$/.test(id || '')))].slice(0, limit);
   const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)/) || [])[1];
   if (!csrf) return {signed_in: false, ids: ids.length, jobs: [], failed: 0, limited: false};

@@ -29,7 +29,8 @@ WORKPLACE_REMOTE = 'TELECOMMUTE'
 EMPLOYMENT = {'FULL_TIME': 'Full-time', 'PART_TIME': 'Part-time', 'CONTRACTOR': 'Contract', 'TEMPORARY': 'Temporary',
               'INTERN': 'Internship', 'PER_DIEM': 'Per diem', 'VOLUNTEER': 'Volunteer'}
 # A Glassdoor search page: /Job/<location>-<keywords>-jobs-SRCH_IL.<location span>_IN<id>_KO<keyword span>.htm
-SEARCH = re.compile(r'^/Job/(?P<slug>[a-z0-9-]+)-jobs-SRCH_(?P<spans>[A-Z0-9_.,]+)\.htm$')
+# The keywords keep their case and punctuation, as in romania-Node.js-backend-remote-jobs-SRCH_….
+SEARCH = re.compile(r'^/Job/(?P<slug>[A-Za-z0-9.+#-]+)-jobs-SRCH_(?P<spans>[A-Z0-9_.,]+)\.htm$')
 LISTING = re.compile(r'^/job-listing/[A-Za-z0-9_.,%-]+\.htm$')
 
 

@@ -6,8 +6,8 @@ The Jev agent types the site's job search in an owned tab of the Chrome profile 
 the profile the user keeps for job hunting. Code checks each chosen action before it executes, then the
 site's runner reads the listed jobs. Reads the request on stdin; prints one JSON line.
 
-`site` is the site's service module (linkedin or glassdoor): NAME, START, Error, refused, on_jobs and
-check_results.
+`site` is the site's service module (linkedin or glassdoor): NAME, START or start(req), Error, refused,
+on_jobs and check_results.
 """
 import contextlib
 import json
@@ -204,7 +204,8 @@ def main(site, read_jobs):
         from jev_ultrafast.browser import MARKER, Browser, StalePage
 
         jev_agent.Browser = profile_browser(Browser, cdp, ensure_daemon)
-        agent = jev_agent.Agent(site.START, req['goal'])
+        start = getattr(site, 'start', None)
+        agent = jev_agent.Agent(start(req) if start else site.START, req['goal'])
         deadline = started + BUDGET
         searched = getattr(site, 'searched', None)
         actions = drive(agent, StalePage, deadline, decisions, site, lambda: settle(agent.browser, MARKER, deadline),

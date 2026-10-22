@@ -6,13 +6,15 @@ only and Python 3.12 compatible.
 from __future__ import annotations
 from pathlib import Path
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import jev
 from jev import JEV_DIR, LIMIT, LOCATION, QUERIES, plain, posted_date, usage_of  # noqa: F401 - used by tests
 
 NAME = 'LinkedIn'
-START = 'https://www.linkedin.com/jobs/search/'
+SEARCH_PAGE = 'https://www.linkedin.com/jobs/search-results/'
+# LinkedIn's location ids. Its search page takes the location from geoId and ignores location=.
+GEO_IDS = {'romania': '106670623'}
 RUNNER = Path(__file__).resolve().with_name('linkedin_jev.py')
 # Controls that change the account or reach other people, in LinkedIn's English and Romanian labels.
 # Checked on the accent-free, lower-case label before any click or typing executes.
@@ -47,11 +49,21 @@ def request(o):
     return dict(query=query, location=LOCATION, limit=LIMIT)
 
 
+def start(req):
+    """Where the agent starts: the requested search's results page. LinkedIn's search page (since Oct 2026
+    /jobs/search-results/, with one "describe the job" box) shows the location as a button the agent could not
+    change, and a typed search reuses the location last searched on the account."""
+    geo = GEO_IDS.get(plain(req['location']))
+    return SEARCH_PAGE + '?' + urlencode(dict(keywords=req['query'], **({'geoId': geo} if geo else {})), quote_via=quote)
+
+
 def goal(req):
-    return (f'Search LinkedIn Jobs for "{req["query"]}" in {req["location"]}: make sure the keyword field holds exactly '
-            f'that text and the location field holds {req["location"]}, then run the search. Stop as soon as the matching '
-            'job results are listed. Do not use filters or change job preferences. Do not open, apply to, save, dismiss '
-            'or share a job, do not create a job alert, and do not message, follow or connect with anyone.')
+    return (f'Search LinkedIn Jobs for "{req["query"]}" in {req["location"]}: the page opens on that search. Make sure '
+            'the job search box (labelled "Descrieți jobul dorit" or "Describe the job you want") holds exactly that '
+            'text and its results are listed; if not, type it and run the search. Leave the location as the page shows '
+            'it. Stop as soon as the matching job results are listed. Do not use filters '
+            'or change job preferences. Do not open, apply to, save, dismiss or share a job, do not create a job alert, '
+            'and do not message, follow or connect with anyone.')
 
 
 def refused(action):
@@ -78,12 +90,23 @@ def check_results(url, req, fields=()):
     params = parse_qs(u.query)
     if not on_jobs(url) or not u.path.startswith('/jobs/search') or not jev.words(req['query']) <= jev.words(' '.join(params.get('keywords', []))):
         raise LinkedInError('The LinkedIn search ended on a page that does not show the requested search.')
-    if 'location' in params and plain(req['location']) not in plain(' '.join(params['location'])):
+    geo = GEO_IDS.get(plain(req['location']))
+    if ('location' in params and plain(req['location']) not in plain(' '.join(params['location']))
+            or geo and params.get('geoId', [geo]) != [geo]):
         raise LinkedInError(f'The LinkedIn search ended on results outside {req["location"]}.')
     # LinkedIn keeps a profile's default location in the field without adding it to the URL.
-    if 'location' not in params and not any(plain(req['location']) in plain(value) for value in fields):
+    if ('location' not in params and 'geoId' not in params
+            and not any(plain(req['location']) in plain(value) for value in fields)):
         return [f'LinkedIn did not show the searched location; roles outside {req["location"]} are dropped by eligibility.']
     return []
+
+
+def searched(url, req):
+    """Whether url is the results page of the requested search, so the agent can stop there."""
+    try:
+        return not check_results(url, req)
+    except LinkedInError:
+        return False
 
 
 def to_jobs(items, job):
