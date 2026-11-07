@@ -1,20 +1,16 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import 'api.dart';
 import 'adaptive.dart';
 import 'applications.dart' show shortDate;
-import 'downloads.dart';
+import 'pdf_view.dart';
 
 const _ink = Color(0xFF172C2A);
 const _accent = Color(0xFF146B57);
 const _muted = Color(0xFF63716D);
 const _error = Color(0xFFB3261E);
-
-typedef Notify = void Function(String text, {SnackBarAction? action});
 
 // The service clips descriptions to this length, so the request stays small.
 const tailorDescriptionChars = 12000;
@@ -157,28 +153,37 @@ Future<void> downloadTailored(
   notify('Downloading the CV for $company…');
   try {
     final cv = await api.file(tailoredPath(id, 'cv'));
-    final saved = await Downloads.save(cv.name ?? 'CV.pdf', cv.bytes);
-    notify(
-      kIsWeb
-          ? 'Download started: ${saved.name} for $company'
-          : 'Saved ${saved.name} for $company to Downloads.',
-      action: kIsWeb
-          ? null
-          : SnackBarAction(
-              label: 'Open',
-              onPressed: () => unawaited(
-                Downloads.open(saved.uri).catchError((Object _) {}),
-              ),
-            ),
-    );
-  } on MissingPluginException {
-    notify('Saving files works in the Android app only.');
-  } on PlatformException catch (e) {
-    notify(e.message ?? 'The CV could not be saved.');
+    await savePdf(cv.bytes, cv.name ?? 'CV.pdf', notify, owner: company);
   } catch (e) {
     notify(e.toString().replaceFirst('Exception: ', ''));
   }
 }
+
+// Opens a tailored CV's PDF inside the app.
+Future<void> viewTailored(
+  BuildContext context,
+  JobsApi Function() api, {
+  required String id,
+  required String company,
+  required String title,
+}) => Navigator.of(context).push(
+  MaterialPageRoute<void>(
+    builder: (_) => PdfViewerPage(
+      api: api,
+      path: tailoredPath(id, 'cv'),
+      title: '$company — $title',
+      owner: company,
+    ),
+  ),
+);
+
+// Opens the main CV inside the app.
+Future<void> viewMainCv(BuildContext context, JobsApi Function() api) =>
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PdfViewerPage(api: api, path: '/cv', title: 'Your CV'),
+      ),
+    );
 
 // When a tailored CV was last built, for the list.
 String builtLabel(String iso) {
@@ -187,7 +192,8 @@ String builtLabel(String iso) {
 }
 
 // The top-bar CV button's sheet: the main CV, tailoring for a pasted
-// posting, and every tailored CV.
+// posting, and every tailored CV. A CV opens in the PDF viewer above the
+// sheet, so going back returns to the list.
 class CvSheet extends StatefulWidget {
   final JobsApi Function() api;
   final ScrollController? controller;
@@ -261,6 +267,16 @@ class _CvSheetState extends State<CvSheet> {
     );
   }
 
+  void view(Map<String, dynamic> cv) => unawaited(
+    viewTailored(
+      context,
+      widget.api,
+      id: cv['id'] as String,
+      company: cv['company'].toString(),
+      title: cv['title'].toString(),
+    ),
+  );
+
   Widget row(Map<String, dynamic> cv) {
     final chat = (cv['chat'] ?? '').toString();
     final pdf = cv['pdf'] == true;
@@ -277,18 +293,24 @@ class _CvSheetState extends State<CvSheet> {
         overflow: TextOverflow.ellipsis,
       ),
       onTap: pdf
-          ? () => unawaited(widget.download(cv))
+          ? () => view(cv)
           : chat.isNotEmpty
           ? () => widget.openChat(chat)
           : null,
       trailing: PopupMenuButton<String>(
         tooltip: 'More for ${cv['company']}',
         onSelected: (choice) => switch (choice) {
+          'view' => view(cv),
           'pdf' => unawaited(widget.download(cv)),
           'report' => report(cv),
           _ => widget.openChat(chat),
         },
         itemBuilder: (_) => [
+          PopupMenuItem(
+            value: 'view',
+            enabled: pdf,
+            child: const Text('View PDF'),
+          ),
           PopupMenuItem(
             value: 'pdf',
             enabled: pdf,
@@ -323,9 +345,14 @@ class _CvSheetState extends State<CvSheet> {
       ),
       ListTile(
         leading: const Icon(Icons.description_outlined, color: _accent),
-        title: const Text('Download your CV'),
+        title: const Text('Your CV'),
         subtitle: const Text('The main CV on the service'),
-        onTap: widget.downloadMain,
+        onTap: () => unawaited(viewMainCv(context, widget.api)),
+        trailing: IconButton(
+          tooltip: 'Download your CV',
+          onPressed: widget.downloadMain,
+          icon: const Icon(Icons.download_rounded),
+        ),
       ),
       ListTile(
         leading: const Icon(Icons.content_paste_outlined, color: _accent),
@@ -498,13 +525,8 @@ List<({String text, int level})> reportBlocks(String markdown) {
 // Shown above a tailoring chat: the CV it builds, and its files once ready.
 class TailorBar extends StatelessWidget {
   final Map<String, dynamic> tailor;
-  final VoidCallback? download, report;
-  const TailorBar({
-    super.key,
-    required this.tailor,
-    this.download,
-    this.report,
-  });
+  final VoidCallback? view, report;
+  const TailorBar({super.key, required this.tailor, this.view, this.report});
   @override
   Widget build(BuildContext context) {
     final company = (tailor['company'] ?? '').toString();
@@ -545,9 +567,9 @@ class TailorBar extends StatelessWidget {
               ),
             if (ready)
               IconButton.filledTonal(
-                tooltip: 'Download tailored CV',
-                onPressed: download,
-                icon: const Icon(Icons.download_rounded),
+                tooltip: 'View tailored CV',
+                onPressed: view,
+                icon: const Icon(Icons.picture_as_pdf_outlined),
               ),
           ],
         ),

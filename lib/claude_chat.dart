@@ -738,21 +738,23 @@ class _ClaudePageState extends State<ClaudePage> {
     ];
   }
 
-  void notify(String text, {SnackBarAction? action}) {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(content: Text(text), action: action));
-  }
-
   // The bar above a tailoring chat, with the CV's files once Claude builds them.
   Widget tailorBar(Map<String, dynamic> tailor) {
     final id = (tailor['id'] ?? '').toString();
     final company = (tailor['company'] ?? '').toString();
     return TailorBar(
       tailor: tailor,
-      download: id.isEmpty
+      view: id.isEmpty
           ? null
-          : () => unawaited(downloadTailored(api, id, company, notify)),
+          : () => unawaited(
+              viewTailored(
+                context,
+                widget.api,
+                id: id,
+                company: company,
+                title: (tailor['title'] ?? '').toString(),
+              ),
+            ),
       report: id.isEmpty
           ? null
           : () => Navigator.of(context).push(

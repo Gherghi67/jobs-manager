@@ -14,7 +14,7 @@ import 'adaptive.dart';
 import 'install_update_stub.dart' if (dart.library.io) 'install_update_io.dart';
 import 'applications.dart';
 import 'claude_chat.dart';
-import 'downloads.dart';
+import 'pdf_view.dart';
 import 'models.dart';
 import 'stats.dart';
 import 'tailor.dart';
@@ -740,22 +740,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     final api = this.api();
     try {
       final cv = await api.file('/cv');
-      final saved = await Downloads.save(cv.name ?? 'CV.pdf', cv.bytes);
-      notify(
-        kIsWeb
-            ? 'Download started: ${saved.name}'
-            : 'Saved ${saved.name} to Downloads.',
-        action: kIsWeb
-            ? null
-            : SnackBarAction(
-                label: 'Open',
-                onPressed: () => unawaited(openCv(saved.uri)),
-              ),
-      );
-    } on MissingPluginException {
-      notify('Saving files works in the Android app only.');
-    } on PlatformException catch (e) {
-      notify(e.message ?? 'The CV could not be saved.');
+      await savePdf(cv.bytes, cv.name ?? 'CV.pdf', notify);
     } catch (e) {
       notify(e.toString().replaceFirst('Exception: ', ''));
     } finally {
@@ -865,14 +850,6 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
         ),
       ),
     );
-  }
-
-  Future<void> openCv(String uri) async {
-    try {
-      await Downloads.open(uri);
-    } on PlatformException catch (e) {
-      notify(e.message ?? 'Could not open the CV.');
-    }
   }
 
   Future<void> openLink(String url) async {

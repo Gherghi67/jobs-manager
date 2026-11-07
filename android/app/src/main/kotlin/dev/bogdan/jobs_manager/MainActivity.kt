@@ -13,7 +13,7 @@ import java.io.File
 import java.security.MessageDigest
 
 // Installs app updates downloaded from the job service, through Android's package installer,
-// and saves files such as the CV to Downloads.
+// saves files such as the CV to Downloads, and draws PDF pages for the app's viewer.
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -68,6 +68,19 @@ class MainActivity : FlutterActivity() {
                     "open" -> {
                         Downloads.open(this, call.argument<String>("uri")!!, call.argument<String>("mime")!!)
                         result.success(null)
+                    }
+                    "render" -> {
+                        val bytes = call.argument<ByteArray>("bytes")!!
+                        val width = call.argument<Int>("width")!!
+                        // Drawing and compressing a page takes a moment; keep it off the UI thread.
+                        Thread {
+                            try {
+                                val pages = PdfPages.render(this, bytes, width)
+                                runOnUiThread { result.success(pages) }
+                            } catch (e: Exception) {
+                                runOnUiThread { result.error("files", e.message ?: e.javaClass.simpleName, null) }
+                            }
+                        }.start()
                     }
                     else -> result.notImplemented()
                 }

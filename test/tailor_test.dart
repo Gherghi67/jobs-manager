@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:jobs_manager/api.dart';
 import 'package:jobs_manager/claude_chat.dart';
 import 'package:jobs_manager/main.dart';
+import 'package:jobs_manager/pdf_view.dart';
 import 'package:jobs_manager/tailor.dart';
 
 const job = {
@@ -126,19 +127,26 @@ MockClient service(
   };
 });
 
-// Fakes Downloads.kt and records its calls.
+// A 1×1 PNG, standing in for a page Android drew.
+final page = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+);
+
+// Fakes Downloads.kt and PdfPages.kt and records their calls.
 List<MethodCall> fakeDownloads(WidgetTester tester) {
   final calls = <MethodCall>[];
   tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
     const MethodChannel('fieldwork/files'),
     (call) async {
       calls.add(call);
-      return call.method == 'save'
-          ? {
-              'uri': 'content://media/external/downloads/9',
-              'name': 'Jane-Doe-CV.pdf',
-            }
-          : null;
+      return switch (call.method) {
+        'save' => {
+          'uri': 'content://media/external/downloads/9',
+          'name': 'Jane-Doe-CV.pdf',
+        },
+        'render' => [page],
+        _ => null,
+      };
     },
   );
   addTearDown(
@@ -226,7 +234,7 @@ void main() {
       find.text('Claude builds the PDF after your answers.'),
       findsOneWidget,
     );
-    expect(find.byTooltip('Download tailored CV'), findsNothing);
+    expect(find.byTooltip('View tailored CV'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -258,9 +266,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('the CV sheet lists tailored CVs and downloads them', (
-    tester,
-  ) async {
+  testWidgets('the CV sheet lists tailored CVs and opens them', (tester) async {
     final calls = fakeDownloads(tester);
     SharedPreferences.setMockInitialValues({
       'token': 'test-token',
@@ -275,6 +281,14 @@ void main() {
     expect(find.text('Acme'), findsOneWidget);
     expect(find.text('Software Engineer · not built yet'), findsOneWidget);
 
+    // The main CV opens in the viewer too.
+    await tester.tap(find.text('Your CV'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PdfViewerPage), findsOneWidget);
+    expect(requests.last.url.path, '/cv');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
     // The report opens from the row's menu.
     await tester.tap(find.byTooltip('More for Acme'));
     await tester.pumpAndSettle();
@@ -285,10 +299,25 @@ void main() {
     await tester.pageBack();
     await tester.pumpAndSettle();
 
+    // A built CV opens in the viewer above the sheet.
     await tester.tap(find.text('Acme'));
     await tester.pumpAndSettle();
-    expect(calls.single.method, 'save');
-    expect(calls.single.arguments, {
+    expect(find.byType(PdfViewerPage), findsOneWidget);
+    expect(find.text('Acme — Backend Engineer'), findsOneWidget);
+    expect(requests.last.url.path, '/tailored/Acme/Backend_Engineer/cv');
+    expect(calls.last.method, 'render');
+    expect(calls.last.arguments['bytes'], [37, 80, 68, 70]);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('Your CVs'), findsOneWidget);
+
+    // Download PDF in the row's menu saves it without opening the viewer.
+    await tester.tap(find.byTooltip('More for Acme'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Download PDF'));
+    await tester.pumpAndSettle();
+    expect(calls.last.method, 'save');
+    expect(calls.last.arguments, {
       'name': 'Jane-Doe-CV.pdf',
       'mime': 'application/pdf',
       'bytes': [37, 80, 68, 70],
@@ -343,17 +372,23 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Your tailored CV is ready.'), findsOneWidget);
-    await tester.tap(find.byTooltip('Download tailored CV'));
+    await tester.tap(find.byTooltip('View tailored CV'));
     await tester.pumpAndSettle();
     expect(
       requests.map((r) => r.url.path),
       contains('/tailored/Acme/Backend_Engineer/cv'),
     );
-    expect(calls.single.method, 'save');
+    expect(find.byType(PdfViewerPage), findsOneWidget);
+    expect(calls.single.method, 'render');
+    await tester.tap(find.byTooltip('Download PDF'));
+    await tester.pumpAndSettle();
+    expect(calls.last.method, 'save');
     expect(
       find.text('Saved Jane-Doe-CV.pdf for Acme to Downloads.'),
       findsOneWidget,
     );
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Read report'));
     await tester.pumpAndSettle();
     expect(find.text('Acme — tailored CV'), findsOneWidget);

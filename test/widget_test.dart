@@ -456,7 +456,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Your CVs'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Download your CV'));
+    await tester.tap(find.byTooltip('Download your CV'));
     await tester.pumpAndSettle();
     expect(calls.single.method, 'save');
     expect(calls.single.arguments, {
