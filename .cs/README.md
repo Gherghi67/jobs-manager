@@ -12,6 +12,10 @@ Adopted as CS session `jobs-manager` on October 9, 2026. The session link at `~/
 
 Git is initialized on `main`; CS committed its adoption metadata. The original ignore rules still exclude credentials, local session state, and generated artifacts.
 
+## Feature: cv-tailor (7 Nov 2026)
+
+Objective: from the phone app and the website, tailor the CV to a job with the resume-tailoring skill. A "Tailor CV" button on a job (or a pasted posting) starts a Claude-page chat on the Mac that asks its gap questions in the chat, builds a one-page tailored PDF and Report.md under the service's `cv/tailored/<Company>/<Role>/`, and the app lists and downloads them.
+
 ## Outcome
 
 October 9, 2026 (first cs conversation): an emulator test found four display problems, which were fixed and tested. The app was committed (`26e5130`) and retested from a clean install with all nine sources live, and the README retest note was committed (`4eb4e1d`). Both commits were merged into `main` by fast-forward; nothing was pushed (no remote).
