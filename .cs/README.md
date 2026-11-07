@@ -43,6 +43,8 @@ October 12, 2026 (ninth conversation): `/fix-review` found no PR, because the re
 
 October 12, 2026 (tenth cs conversation): searches now also fetch LinkedIn Jobs. The jev-ultrafast browser agent types the search in the Chrome profile signed in to LinkedIn, behind a code guard that refuses applying, saving, messaging and similar controls. Code then reads up to 25 listed jobs from LinkedIn's own job-detail JSON. Live: 2 agent actions, 31–33 s, 25 fetched, 12 kept after ranking. The service was restarted with it (`linkedin_available: true`). Then, at the user's "yes, go", the app got a LinkedIn switch under Job sources and LinkedIn in the search summary. Build 29863531 was published (APK and website) and checked on the emulator. Uncommitted.
 
+November 7, 2026 (feature worktree `cv-tailor`): built CV tailoring. A "Tailor CV" button on a job, or a pasted posting, starts a Claude page chat that follows the resume-tailoring skill in `cv/tailored/<Company>/<Role>/`. Claude asks its gap questions in the chat, then builds the PDF and `Report.md`, and the app's **Your CVs** sheet downloads them. 275 backend and 72 Flutter tests pass. A live end-to-end run on a temporary instance built and served a one-page PDF. Committed as `5839c84` (with notes in `7d6b7e6`) on `cs/cv-tailor`. Not deployed: it lands through `/finish cv-tailor` once the base's uncommitted work is committed.
+
 - Summary: `.cs/summary.md`
 - Durable memory index: `.cs/memory/MEMORY.md`
 - Configured narrative: `.cs/memory/narrative.bogdan-gherghina-erepubliklabs-com.md`

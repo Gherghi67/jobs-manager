@@ -1,0 +1,2 @@
+{"ts":"2026-11-07T13:55:22Z","event":"started","engine":"claude","run_id":"00f42743-0662-4f78-acb3-59a405b476e2","role":"lead","source":"startup","session_id":"d5b8a6c6-4f71-4535-a57b-b938faee1e04","branch":"cs/cv-tailor"}
+{"ts":"2026-11-07T14:48:05Z","event":"ended","source":"prompt_input_exit","session_id":"d5b8a6c6-4f71-4535-a57b-b938faee1e04","engine":"claude","run_id":"00f42743-0662-4f78-acb3-59a405b476e2","branch":"cs/cv-tailor"}
