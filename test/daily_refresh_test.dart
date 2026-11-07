@@ -48,6 +48,35 @@ void main() {
     expect(label, contains('Last Gmail sync:'));
     expect(label, contains('Refreshed:'));
   });
+  test('replies waiting for their application are named', () {
+    final label = gmailSyncLabel({
+      'enabled': true,
+      'error': '',
+      'last_success': '2026-10-08T12:00:00Z',
+      'left_out': [
+        {'company': 'SME Careers', 'subject': 'Application Update'},
+        {'company': 'Curotec', 'subject': 'Did you hear back from Curotec?'},
+      ],
+    }, now);
+    expect(
+      label,
+      contains(
+        '2 replies wait for an application in your list: SME Careers — '
+        'Application Update; Curotec — Did you hear back from Curotec?. '
+        'Add the applications',
+      ),
+    );
+    // Waiting replies don't turn the mark red: the sync itself worked.
+    expect(
+      syncHealth({
+        'enabled': true,
+        'left_out': [{}],
+      }, now),
+      SyncHealth.ok,
+    );
+    expect(gmailSyncLabel({'enabled': true}, now), isNot(contains('wait')));
+  });
+
   test('refresh mark is green only after a good refresh and sync', () {
     expect(syncHealth({'enabled': true}, now), SyncHealth.ok);
     expect(syncHealth({}, null), SyncHealth.unknown);

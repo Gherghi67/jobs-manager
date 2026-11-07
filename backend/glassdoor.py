@@ -15,6 +15,9 @@ from jev import JEV_DIR, LIMIT, LOCATION, QUERIES, plain
 
 NAME = 'Glassdoor'
 START = 'https://www.glassdoor.com/Job/index.htm'
+# The jev.PLACES searched for hybrid roles. Glassdoor lists no jobs in Malta: on 7 Nov 2026 its Malta page
+# (IN166) showed none, even for "software engineer", so that run would only cost time and agent tokens.
+HYBRID_PLACES = ('romania',)
 RUNNER = Path(__file__).resolve().with_name('glassdoor_jev.py')
 # Controls that change the account, reach other people or post content, checked on the accent-free,
 # lower-case label before any click or typing executes. Glassdoor's "give to get" wall asks for a
@@ -45,12 +48,16 @@ def enabled():
     return jev.enabled('JOBS_GLASSDOOR')
 
 
-def request(o):
+def request(o, place=None):
+    """The search for remote roles in LOCATION or, with a place from jev.PLACES, for hybrid roles there."""
     terms = [t.strip() for t in o['keywords'].split(',') if t.strip()]
     # Glassdoor's job title field takes one phrase, not LinkedIn's OR syntax.
     query = terms[0] if terms else QUERIES[o['preset']]
     # A keyword, not Glassdoor's Remote filter, as for LinkedIn: each job's JobPosting says whether it is
     # remote and where applicants may live, and rank() applies remote_only and eligibility to that.
+    if place:
+        # JobPosting has no hybrid type, so rank() keeps the roles whose text says hybrid and whose location is there.
+        return dict(query=query + ' hybrid', location=jev.PLACES[place], limit=LIMIT)
     if o['remote_only']:
         query += ' remote'
     return dict(query=query, location=LOCATION, limit=LIMIT)
@@ -153,11 +160,11 @@ def to_jobs(items, job):
     return rows
 
 
-def fetch(o, job, record=None, runner=None):
-    """Returns (jobs, warnings) like the other collectors, or raises GlassdoorError.
+def fetch(o, job, record=None, runner=None, place=None):
+    """Returns (jobs, warnings) like the other collectors, or raises GlassdoorError. place searches hybrid roles there.
     record receives the run's usage, also when the run failed after the agent started. runner replaces subprocess.run."""
     if not enabled():
         raise GlassdoorError(f'Glassdoor needs jev-ultrafast installed at {JEV_DIR}.')
-    req = request(o)
+    req = request(o, place)
     items, warnings = jev.run(NAME, RUNNER, GlassdoorError, req, goal(req), record, runner)
     return to_jobs(items, job), warnings

@@ -48,8 +48,16 @@ PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads'
 RETIRED_BOARDS = ('weworkremotely',)
 # The markets the app offers. All eight with the broad preset's 4 queries make 32 calls at 2.5 s apart.
 ADZUNA_MARKETS = ('us', 'gb', 'de', 'nl', 'pl', 'at', 'es', 'fr')
+# Countries whose hybrid roles a search adds to the remote ones (the `hybrid` option), with the words that place a
+# role's location there, matched on the accent-free, lower-case location. LinkedIn writes Il-Gżira as "il-gzira".
+HYBRID_PLACES = {
+    'romania': re.compile(r'\b(?:romania|bucharest|bucuresti|ilfov|pipera|cluj|iasi|timisoara|brasov|constanta|sibiu'
+                          r'|oradea|craiova)\b'),
+    'malta': re.compile(r"\b(?:malta|valletta|sliema|gzira|msida|birkirkara|swieqi|mosta|naxxar|qormi|luqa|mriehel"
+                        r"|san gwann|san giljan|ta['’]? ?xbiex|(?:st\.?|saint) julian['’]?s|(?:st\.?|santa) venera)\b"),
+}
 DEFAULTS = dict(preset='broad', adzuna=True, linkedin=True, glassdoor=True, boards=PUBLIC_SOURCES, countries=['de', 'nl', 'gb'],
-                keywords='', remote_only=True, eligibility='romania', contract_only=False,
+                keywords='', remote_only=True, eligibility='romania', hybrid=list(HYBRID_PLACES), contract_only=False,
                 prefer_contract=True, max_age_days=30, ai_pick=True, ai_engine='claude', ai_subscription='personal',
                 dismissed=[])
 # The app sends its most recent dismissals, ~27 bytes each in JSON.
@@ -87,6 +95,8 @@ def validate_options(value):
         raise ValueError('Enable at least one source.')
     if o['eligibility'] not in ('romania', 'romania_unclear', 'all'):
         raise ValueError('Unknown eligibility option.')
+    if not isinstance(o['hybrid'], list) or any(not isinstance(x, str) or x not in HYBRID_PLACES for x in o['hybrid']):
+        raise ValueError('Hybrid roles can be added only for Romania and Malta.')
     if type(o['max_age_days']) is not int or not 1 <= o['max_age_days'] <= 90:
         raise ValueError('Age must be 1–90 days.')
     if not isinstance(o['keywords'], str) or len(o['keywords']) > 200:
@@ -96,6 +106,7 @@ def validate_options(value):
         raise ValueError(f'Dismissed roles must be at most {MAX_DISMISSED} listing ids.')
     o['boards'] = list(dict.fromkeys(o['boards']))
     o['countries'] = list(dict.fromkeys(o['countries']))
+    o['hybrid'] = list(dict.fromkeys(o['hybrid']))
     return o
 
 
@@ -131,6 +142,38 @@ def eligibility(item, locator):
     return 'other'
 
 
+# The workplace type a site appended to the location: LinkedIn's (Remote), (Hybrid) or (On-site), Glassdoor's (Remote).
+WORKPLACE_TAG = re.compile(r'\((remote|hybrid|on-site)\)\s*$')
+HYBRID = r'(?:hybrid|hibrid)'
+# In a title or location, "hybrid" means the workplace unless it names a technology.
+HYBRID_WORD = re.compile(rf'\b{HYBRID}\b(?!\s+(?:cloud|apps?|mobile|infrastructure|it|integration))')
+# Descriptions say "hybrid cloud" too, so there it must describe how the job is worked, in English or Romanian.
+HYBRID_WORK = re.compile(
+    rf'\b{HYBRID}\s+(?:work\w*|model|role|position|job|schedule|set-?up|arrangement|office|mode|policy|format|regime'
+    rf'|basis|lucru|munca)\b'
+    rf'|\b{HYBRID}\b\W{{0,3}}(?:\w+\W+){{0,4}}?(?:\d|one|two|three|four)\s*(?:days?|x)\b'
+    rf'|\b(?:location|workplace|work model|work mode|working model|work arrangement|work setup|work type|regim'
+    rf'|program|mod de lucru|lucru)\s*[:\-–]?\s*(?:is\s+)?(?:fully\s+)?{HYBRID}\b'
+    rf'|\b(?:is|are)\s+{HYBRID}\b(?!\s+(?:cloud|apps?|mobile|infrastructure))'
+    rf'|\b(?:remote|on-?site|office)\s*[/|]\s*{HYBRID}\b|\b{HYBRID}\s*[/|]\s*(?:remote|on-?site|office)\b')
+
+
+def hybrid_place(item, places):
+    """The place, of those the search asked for, where item is a hybrid role, or None. A workplace type the site
+    appended to the location decides; otherwise the title or location says hybrid or the description describes
+    hybrid work. Only the location places the role: a description may name offices the role isn't at."""
+    if not places:
+        return None
+    location = jev.plain(item.get('location'))
+    tag = WORKPLACE_TAG.search(location)
+    if tag:
+        hybrid = tag.group(1) == 'hybrid'
+    else:
+        hybrid = bool(HYBRID_WORD.search(jev.plain(item.get('title')) + ' | ' + location)
+                      or HYBRID_WORK.search(jev.plain(item.get('description'))))
+    return next((p for p in places if HYBRID_PLACES[p].search(location)), None) if hybrid else None
+
+
 def rank(raw, o):
     c = search_config(o)
     scorer = az.Scorer(c['scoring'])
@@ -150,17 +193,22 @@ def rank(raw, o):
         score, matched = scorer.score(item['title'], item['description'] + ' ' + ' '.join(item['tags']))
         if score < c.get('min_score', 1) or not matched['core']:
             continue
-        label = remote_labeler.label(item['title'], item['description'], item['location'])
-        # Remote-focused feeds imply remote, but never override explicit hybrid text.
-        if label == 'unknown' and item['source'] in PUBLIC_SOURCES and item['source'] not in ('hackernews', 'arbeitnow'):
-            label = 'yes'
-        if o['remote_only'] and label != 'yes':
-            continue
-        item['remote'] = label
-        item['eligibility'] = eligibility(item, locator)
-        allowed = ('worldwide', 'europe') if o['eligibility'] == 'romania' else ('worldwide', 'europe', 'unclear')
-        if o['eligibility'] != 'all' and item['eligibility'] not in allowed:
-            continue
+        place = hybrid_place(item, o['hybrid'])
+        if place:
+            # Wanted beside the remote roles: remote_only and eligibility are about where a remote role may be worked.
+            item.update(remote='hybrid', eligibility='hybrid-' + place)
+        else:
+            label = remote_labeler.label(item['title'], item['description'], item['location'])
+            # Remote-focused feeds imply remote, but never override explicit hybrid text.
+            if label == 'unknown' and item['source'] in PUBLIC_SOURCES and item['source'] not in ('hackernews', 'arbeitnow'):
+                label = 'yes'
+            if o['remote_only'] and label != 'yes':
+                continue
+            item['remote'] = label
+            item['eligibility'] = eligibility(item, locator)
+            allowed = ('worldwide', 'europe') if o['eligibility'] == 'romania' else ('worldwide', 'europe', 'unclear')
+            if o['eligibility'] != 'all' and item['eligibility'] not in allowed:
+                continue
         item['type'] = remote.employment(item)
         if o['contract_only'] and item['type'] != 'contract':
             continue
@@ -176,7 +224,7 @@ def rank(raw, o):
         kept[identity] = item
     rows = list(kept.values())
     rows.sort(key=lambda j: j.get('posted', ''), reverse=True)
-    rows.sort(key=lambda j: ((0 if j['eligibility'] in ('worldwide', 'europe') else 1),
+    rows.sort(key=lambda j: ((0 if j['eligibility'] in ('worldwide', 'europe') or j['eligibility'].startswith('hybrid-') else 1),
                             remote.TYPE_ORDER[j['type']] if o['prefer_contract'] else 0, -j['score']))
     return rows
 
@@ -641,8 +689,12 @@ class SearchResults:
                 print(f'Could not save the search results: {exc}', file=sys.stderr)
 
 
+# How long a search waits for its Gmail check after the sources are done.
+GMAIL_WAIT = 180
+
+
 class Engine:
-    def __init__(self, applied=None, jev_usage=None, results=None):
+    def __init__(self, applied=None, jev_usage=None, results=None, gmail=None):
         self.lock = threading.Lock()
         self.runs = {}
         self.stops = {}
@@ -652,6 +704,8 @@ class Engine:
         self.jev_usage = jev_usage or JevUsage(JEV_USAGE_FILE, jev_price())
         # The service passes SEARCH_FILE; without it (tests) results stay in memory.
         self.results = results or SearchResults()
+        # The service's GmailSync, which every search runs first; None skips it.
+        self.gmail = gmail
 
     def start(self, options):
         o = validate_options(options)
@@ -751,23 +805,39 @@ class Engine:
             plans += [(name, c.get('sources', {}).get(name, config('remote_config.json')['sources'].get(name, {}))) for name in o['boards']]
             if o['preset'] == 'gaming' and o['boards']:
                 plans += [(name, opts) for name, opts in c['sources'].items() if name not in PUBLIC_SOURCES]
-            # Last: the browser agents take the longest, so the other sources show first.
-            if o['linkedin'] and linkedin.enabled():
-                plans.append(('linkedin', None))
-            if o['glassdoor'] and glassdoor.enabled():
-                plans.append(('glassdoor', None))
+            # Last: the browser agents take the longest, so the other sources show first. Each one searches remote
+            # roles, then hybrid roles in each place asked for; for these sites a plan's options is that place.
+            # Romania's goes last: LinkedIn keeps the last searched country as the account's job search location.
+            places = sorted(o['hybrid'], key=lambda place: place == 'romania')
+            for name, site in (('linkedin', linkedin), ('glassdoor', glassdoor)):
+                if o[name] and site.enabled():
+                    plans += [(name, None)] + [(name, place) for place in places if place in site.HYBRID_PLACES]
             self.update(key, total=len(plans))
+            # Gmail is checked beside the sources, so applications found by email are left out below. A cancelled
+            # search doesn't stop the check: the next search would only wait for it.
+            checked = {}
+            def check_gmail():
+                try:
+                    checked['gmail'] = self.gmail.run_for_search(o['ai_engine'], o['ai_subscription'])
+                except Exception:
+                    checked['gmail'] = dict(status='error', message='Gmail check failed; check the server.')
+            gmail = threading.Thread(target=check_gmail, name='gmail-search', daemon=True) if self.gmail else None
+            if gmail:
+                gmail.start()
             for name, options in plans:
-                self.update(key, current=f'Fetching {name}', source=name)
+                # A browser agent's hybrid search names its place; the app shows it beside the source.
+                place = options if name in ('linkedin', 'glassdoor') else None
+                self.update(key, current=f'Fetching {name}' + (f' hybrid roles in {jev.PLACES[place]}' if place else ''),
+                            source=name, place=place)
                 try:
                     if name == 'adzuna':
                         cache_key = json.dumps(['adzuna', o['preset'], o['countries'], o['keywords'], o['max_age_days']], sort_keys=True)
                         (rows, warnings), cached = self.cached(cache_key, lambda: self.adzuna(o))
                     elif name in ('linkedin', 'glassdoor'):
                         site = linkedin if name == 'linkedin' else glassdoor
-                        cache_key = json.dumps([name, site.request(o)], sort_keys=True)
+                        cache_key = json.dumps([name, site.request(o, place)], sort_keys=True)
                         (rows, warnings), cached = self.cached(
-                            cache_key, lambda: site.fetch(o, remote.job, record=self.jev_usage.add, runner=stop.run))
+                            cache_key, lambda: site.fetch(o, remote.job, record=self.jev_usage.add, runner=stop.run, place=place))
                     else:
                         options = copy.deepcopy(options)
                         if name == 'himalayas':
@@ -785,22 +855,34 @@ class Engine:
                             return result, options["_failures"]
                         (rows, warnings), cached = self.cached(cache_key, fetch)
                     raw.extend(rows)
-                    statuses.append(dict(name=name, status='partial' if warnings else 'ok', count=len(rows), cached=cached, message=str(warnings) if warnings else ''))
+                    statuses.append(dict(name=name, status='partial' if warnings else 'ok', count=len(rows), cached=cached, message=str(warnings) if warnings else '',
+                                         **({'place': place} if place else {})))
                 except Exception as exc:
                     # Never expose upstream URLs that could contain API keys.
                     own = (name == 'adzuna' and isinstance(exc, ValueError)) or isinstance(exc, jev.AgentError)
                     message = str(exc) if own else f'{type(exc).__name__}: source unavailable; other sources continue.'
-                    statuses.append(dict(name=name, status='error', count=0, cached=False, message=message))
+                    statuses.append(dict(name=name, status='error', count=0, cached=False, message=message,
+                                         **({'place': place} if place else {})))
                 # Applied roles go before Claude's step, so they are never ranked or shown again.
                 jobs, hidden = self.applied.exclude(rank(raw, o))
                 # Dismissed roles still come back for the Dismissed tab, but last and outside the AI step,
                 # so they never take a shortlist slot from a role the user hasn't seen.
                 jobs, set_aside = [j for j in jobs if j['id'] not in dismissed], [j for j in jobs if j['id'] in dismissed]
                 self.update(key, jobs=jobs + set_aside, sources=copy.deepcopy(statuses), fetched=len(raw), applied_hidden=hidden)
+            if gmail:
+                self.update(key, current='Checking Gmail for roles you applied to', source=None, place=None)
+                deadline = time.monotonic() + GMAIL_WAIT
+                while gmail.is_alive() and not stop.event.is_set() and time.monotonic() < deadline:
+                    gmail.join(1)
+                line = checked.get('gmail', dict(status='error', message='Gmail check still running; roles you applied to '
+                                                                         'by email since the last check may show.'))
+                jobs, hidden = self.applied.exclude(rank(raw, o))
+                jobs, set_aside = [j for j in jobs if j['id'] not in dismissed], [j for j in jobs if j['id'] in dismissed]
+                self.update(key, jobs=jobs + set_aside, applied_hidden=hidden, **({'gmail': line} if line else {}))
             if o['ai_pick'] and jobs:
                 count = min(len(jobs), ai.LIMIT)
                 label = f'{o["ai_engine"].title()} · {o["ai_subscription"].title()}'
-                self.update(key, current=f'{label} is ranking {count} role{"" if count == 1 else "s"}', source=None)
+                self.update(key, current=f'{label} is ranking {count} role{"" if count == 1 else "s"}', source=None, place=None)
                 try:
                     # Work on a copy: polling threads deep-copy the published run state.
                     jobs, status = ai.pick(copy.deepcopy(jobs), o, self.ai_cache, stop.run)
@@ -1144,6 +1226,8 @@ def main():
     p.add_argument('--host', default='127.0.0.1')
     p.add_argument('--port', type=int, default=8765)
     args = p.parse_args()
+    # Taken out of the environment so no child process (the Claude page, ranking, the browser agents) inherits it.
+    gmail_password = os.environ.pop('JOBS_GMAIL_APP_PASSWORD', '')
     token_path = ROOT / '.access-token'
     token = os.environ.get('JOBS_ACCESS_TOKEN', '')
     if not token:
@@ -1158,7 +1242,12 @@ def main():
     print(f'Jobs service: http://{args.host}:{args.port}', flush=True)
     print('Use the token from backend/.access-token (or JOBS_ACCESS_TOKEN) in the app.', flush=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    Handler.gmail = gmail_sync.GmailSync(Handler.engine.applied)
+    def gmail_choice():
+        # A daily sweep uses the engine and subscription of the last search.
+        o = (Handler.engine.results.get() or {}).get('options') or {}
+        return o.get('ai_engine', 'claude'), o.get('ai_subscription', 'personal')
+    Handler.gmail = Handler.engine.gmail = gmail_sync.GmailSync(Handler.engine.applied, choice=gmail_choice,
+                                                                password=gmail_password)
     Handler.gmail.start()
     server.serve_forever()
 

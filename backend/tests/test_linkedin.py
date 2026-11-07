@@ -64,6 +64,24 @@ class RequestTests(unittest.TestCase):
         req = linkedin.request(s.validate_options({'preset': 'backend', 'remote_only': False, 'max_age_days': 7}))
         self.assertEqual(req, dict(query='Node.js backend', location=linkedin.LOCATION, limit=linkedin.LIMIT))
 
+    def test_a_hybrid_search_names_its_country(self):
+        o = s.validate_options({})
+        req = linkedin.request(o, 'malta')
+        self.assertEqual(req, dict(query='backend engineer hybrid', location='Malta', limit=linkedin.LIMIT))
+        self.assertEqual(linkedin.request(s.validate_options({'keywords': 'NestJS'}), 'romania')['query'], 'NestJS hybrid')
+        url = linkedin.start(req)
+        self.assertEqual(url, 'https://www.linkedin.com/jobs/search-results/?keywords=backend%20engineer%20hybrid&geoId=100961908')
+        self.assertTrue(linkedin.searched(url, req))
+        # Romania's results are not Malta's.
+        self.assertFalse(linkedin.searched(url.replace('100961908', '106670623'), req))
+        self.assertIn('"backend engineer hybrid" in Malta', linkedin.goal(req))
+
+    def test_a_hybrid_role_in_malta_passes_ranking(self):
+        rows = linkedin.to_jobs([item(location='San Ġiljan, Saint Julian’s, Malta', workplace=3),
+                                 item(id='4465712623', company='Onsite', location='Msida, Malta', workplace=1)], s.remote.job)
+        ranked = s.rank(rows, s.validate_options({}))
+        self.assertEqual([(r['company'], r['eligibility']) for r in ranked], [('Quik Hire Staffing', 'hybrid-malta')])
+
     def test_goal_names_the_search_and_forbids_filters_and_account_changes(self):
         text = linkedin.goal(linkedin.request(s.validate_options({})))
         self.assertIn('"backend engineer remote" in Romania', text)
@@ -392,19 +410,19 @@ class EngineTests(unittest.TestCase):
         self.engine.runs['x'] = {}
 
     def run_search(self, fetch, **options):
-        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, **options})
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, 'hybrid': [], **options})
         with patch.object(linkedin, 'enabled', return_value=True), patch.object(linkedin, 'fetch', fetch), \
              patch.dict(s.remote.SOURCES, {'remotive': lambda *a: []}):
             self.engine.run('x', o)
         return self.engine.get('x')
 
     def test_linkedin_runs_last_and_its_roles_are_ranked(self):
-        result = self.run_search(lambda o, job, record=None, runner=None: (linkedin.to_jobs([item()], job), []))
+        result = self.run_search(lambda o, job, record=None, runner=None, place=None: (linkedin.to_jobs([item()], job), []))
         self.assertEqual([x['name'] for x in result['sources']], ['remotive', 'linkedin'])
         self.assertEqual([j['source'] for j in result['jobs']], ['linkedin'])
 
     def test_linkedin_errors_keep_their_message(self):
-        def fail(o, job, record=None, runner=None):
+        def fail(o, job, record=None, runner=None, place=None):
             raise linkedin.LinkedInError('No open Chrome profile is signed in to LinkedIn.')
         result = self.run_search(fail)
         self.assertEqual(result['status'], 'complete')
@@ -412,14 +430,39 @@ class EngineTests(unittest.TestCase):
 
     def test_a_search_records_the_agent_usage(self):
         self.engine.jev_usage = s.JevUsage(Path(self.folder.name) / 'jev-usage.json')
-        def fetch(o, job, record=None, runner=None):
+        def fetch(o, job, record=None, runner=None, place=None):
             record(dict(requests=5, input_tokens=15000, output_tokens=1000))
             return [], []
         self.run_search(fetch)
         self.assertEqual(self.engine.jev_usage.summary()['last']['requests'], 5)
 
+    def test_hybrid_searches_follow_the_remote_one_for_each_country(self):
+        places, progress = [], []
+        update = self.engine.update
+        def watch(key, **fields):
+            if 'source' in fields:
+                progress.append(fields['current'])
+            return update(key, **fields)
+        def fetch(o, job, record=None, runner=None, place=None):
+            places.append(place)
+            location = {None: 'EMEA', 'romania': 'Bucharest, Bucharest, Romania', 'malta': 'Sliema, Malta'}[place]
+            return linkedin.to_jobs([item(id=str(4400000000 + len(places)), company=f'Co {place}', location=location,
+                                          workplace=2 if place is None else 3)], job), []
+        with patch.object(self.engine, 'update', watch):
+            result = self.run_search(fetch, hybrid=['romania', 'malta'])
+        # Romania's search ends the run, so the account's LinkedIn location stays Romania.
+        self.assertEqual(places, [None, 'malta', 'romania'])
+        self.assertEqual([(x['name'], x.get('place')) for x in result['sources']],
+                         [('remotive', None), ('linkedin', None), ('linkedin', 'malta'), ('linkedin', 'romania')])
+        self.assertIn('Fetching linkedin hybrid roles in Malta', progress)
+        self.assertEqual(result['total'], 4)
+        self.assertEqual({j['company']: j['eligibility'] for j in result['jobs']},
+                         {'Co None': 'europe', 'Co romania': 'hybrid-romania', 'Co malta': 'hybrid-malta'})
+        # Each country's search is cached on its own.
+        self.assertEqual(len([k for k in self.engine.cache if k.startswith('["linkedin"')]), 3)
+
     def test_switched_off_per_search(self):
-        def never(o, job, record=None, runner=None):
+        def never(o, job, record=None, runner=None, place=None):
             raise AssertionError('LinkedIn should not run')
         result = self.run_search(never, linkedin=False)
         self.assertEqual([x['name'] for x in result['sources']], ['remotive'])

@@ -305,6 +305,35 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  test('the progress line names the source and a hybrid search\'s country', () {
+    expect(
+      progressLine({
+        'source': 'linkedin',
+        'place': 'romania',
+        'current': 'Fetching linkedin hybrid roles in Romania',
+        'fetched': 1616,
+      }),
+      'Fetching LinkedIn · hybrid in Romania · 1616 collected',
+    );
+    expect(
+      progressLine({'source': 'glassdoor', 'place': null, 'fetched': 3}),
+      'Fetching Glassdoor · 3 collected',
+    );
+    // A service from before 7 Nov 2026 sends no place.
+    expect(
+      progressLine({'source': 'remotive', 'fetched': 0}),
+      'Fetching Remotive · 0 collected',
+    );
+    expect(
+      progressLine({
+        'source': null,
+        'current': 'Checking Gmail for roles you applied to',
+        'fetched': 40,
+      }),
+      'Checking Gmail for roles you applied to · 40 collected',
+    );
+  });
+
   test('the Jev usage line prices the last run and the periods', () {
     expect(
       jevUsageText({

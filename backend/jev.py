@@ -18,6 +18,9 @@ JEV_DIR = Path(os.environ.get('JOBS_JEV_DIR') or Path.home() / 'Documents' / 'je
 TIMEOUT = 240
 LIMIT = 25
 LOCATION = os.environ.get('JOBS_LINKEDIN_LOCATION') or 'Romania'
+# Where a search also looks for hybrid roles, by the key the app sends (the `hybrid` option), as each site's
+# location. The remote search above stays as it is.
+PLACES = {'romania': 'Romania', 'malta': 'Malta'}
 QUERIES = {'backend': 'Node.js backend', 'broad': 'backend engineer', 'gaming': 'game backend engineer'}
 # Parent variables the agent never needs. It loads its own keys from jev-ultrafast/.env.
 SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|ADZUNA', re.I)

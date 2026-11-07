@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: reference
   originSessionId: 09bcf62e-ac7c-4fd0-9d14-2d7c22258362
-  modified: 2026-10-11T14:50:00.000Z
+  modified: 2026-10-22T15:32:07.839Z
 ---
 
 On the tailnet of actor bogdan-gherghina-erepubliklabs-com (set up 2026-10-09), the Fieldwork service is published with Tailscale Serve at `https://macbook-pro-2.tailaedfae.ts.net`. It is tailnet-only and proxies to `http://127.0.0.1:8765`, and that is the URL the phone app uses. Devices: `macbook-pro-2` (macOS, runs the service) and `pixel-10-pro` (Android). The Mac's Tailscale CLI is `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, from the Homebrew `tailscale-app` cask, which needs sudo, so the user installs it. `tailscale serve status` shows the current mappings.
@@ -15,3 +15,5 @@ When the app on the phone reports "Cannot reach the service" while the Mac side 
 Taildrop (`tailscale file cp`) to the Pixel stalled with no prompt on the phone, so don't rely on it for getting files there. See [[project-fieldwork]] for the service and update flow.
 
 A **502** from the tailnet URL means nothing is listening on 127.0.0.1:8765. Tailscale Serve keeps its mappings across reboots, but the service has no LaunchAgent: it runs only from `nohup scripts/serve.sh`, so after a Mac reboot it stays down until someone restarts it (first seen 2026-10-11, after the 22:36 reboot on 10 Oct). Restart: `nohup scripts/serve.sh >> backend/service.log 2>&1 < /dev/null &`. An unauthenticated `/health` answering 401 means it is up.
+
+**"Site can't be reached"** (DNS failure, not a 502) can mean the Mac's tailnet name changed. On 2026-10-22 the OS hostname was `erp-bogdang-mac` (cause unknown, after the 19 Oct reboot), Tailscale's machine name had followed it, and `macbook-pro-2.tailaedfae.ts.net` no longer resolved. The Serve config is keyed on the old name, so it went dead too. Fix: `tailscale set --hostname=macbook-pro-2` pins the tailnet name regardless of the OS hostname (`--hostname=` with no value undoes it). The Mac's own DNS cache took about 10 s to pick up the restored name.

@@ -14,7 +14,10 @@ from jev import JEV_DIR, LIMIT, LOCATION, QUERIES, plain, posted_date, usage_of 
 NAME = 'LinkedIn'
 SEARCH_PAGE = 'https://www.linkedin.com/jobs/search-results/'
 # LinkedIn's location ids. Its search page takes the location from geoId and ignores location=.
-GEO_IDS = {'romania': '106670623'}
+# Malta's was checked on 7 Nov 2026 against LinkedIn's public job search, which listed only Maltese towns.
+GEO_IDS = {'romania': '106670623', 'malta': '100961908'}
+# The jev.PLACES searched for hybrid roles.
+HYBRID_PLACES = ('romania', 'malta')
 RUNNER = Path(__file__).resolve().with_name('linkedin_jev.py')
 # Controls that change the account or reach other people, in LinkedIn's English and Romanian labels.
 # Checked on the accent-free, lower-case label before any click or typing executes.
@@ -39,11 +42,15 @@ def enabled():
     return jev.enabled('JOBS_LINKEDIN')
 
 
-def request(o):
+def request(o, place=None):
+    """The search for remote roles in LOCATION or, with a place from jev.PLACES, for hybrid roles there."""
     terms = [t.strip() for t in o['keywords'].split(',') if t.strip()]
     query = (terms[0] if len(terms) == 1 else '(' + ' OR '.join(terms[:3]) + ')') if terms else QUERIES[o['preset']]
     # A keyword, not LinkedIn's Remote filter: the agent lost its way in the filter menus. Workplace type and
     # posting date come from each job's details, and rank() applies remote_only and max_age_days to them.
+    if place:
+        # rank() keeps only the roles whose details say Hybrid and whose location is in that country.
+        return dict(query=query + ' hybrid', location=jev.PLACES[place], limit=LIMIT)
     if o['remote_only']:
         query += ' remote'
     return dict(query=query, location=LOCATION, limit=LIMIT)
@@ -127,11 +134,11 @@ def to_jobs(items, job):
     return rows
 
 
-def fetch(o, job, record=None, runner=None):
-    """Returns (jobs, warnings) like the other collectors, or raises LinkedInError.
+def fetch(o, job, record=None, runner=None, place=None):
+    """Returns (jobs, warnings) like the other collectors, or raises LinkedInError. place searches hybrid roles there.
     record receives the run's usage, also when the run failed after the agent started. runner replaces subprocess.run."""
     if not enabled():
         raise LinkedInError(f'LinkedIn needs jev-ultrafast installed at {JEV_DIR}.')
-    req = request(o)
+    req = request(o, place)
     items, warnings = jev.run(NAME, RUNNER, LinkedInError, req, goal(req), record, runner)
     return to_jobs(items, job), warnings

@@ -77,7 +77,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
   Map<String, dynamic> applied = {};
   Set<String> dismissed = {}, applying = {};
   List<dynamic> sources = [];
-  Map<String, dynamic>? aiStatus;
+  // The search's Gmail check: what it found, or why it couldn't run.
+  Map<String, dynamic>? aiStatus, gmailCheck;
   String baseUrl = kIsWeb ? Uri.base.origin : 'http://127.0.0.1:8765',
       token = '',
       status = '',
@@ -163,7 +164,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       options['boards'] = (options['boards'] as List)
           .where(boardNames.containsKey)
           .toList();
-      saved =Map<String, dynamic>.from(
+      saved = Map<String, dynamic>.from(
         jsonDecode(p.getString('saved') ?? '{}'),
       );
       dismissed = (p.getStringList('dismissed') ?? []).toSet();
@@ -183,6 +184,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
       sources = jsonDecode(p.getString('sources') ?? '[]') as List;
       final ai = jsonDecode(p.getString('ai') ?? 'null');
       aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
+      final gmail = jsonDecode(p.getString('gmail_check') ?? 'null');
+      gmailCheck = gmail is Map ? Map<String, dynamic>.from(gmail) : null;
       cached = jobs.isNotEmpty;
     } catch (_) {
       error = 'Some saved data could not be loaded. Run a new search.';
@@ -223,6 +226,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     await p.setString('jobs', jsonEncode(jobs.map((j) => j.data).toList()));
     await p.setString('sources', jsonEncode(sources));
     await p.setString('ai', jsonEncode(aiStatus));
+    await p.setString('gmail_check', jsonEncode(gmailCheck));
     await p.setString('updated', updated);
     await p.setString('url', baseUrl);
     await p.setString('token', token);
@@ -281,6 +285,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     updated = result['updated_at'] as String? ?? '';
     final ai = result['ai'];
     aiStatus = ai is Map ? Map<String, dynamic>.from(ai) : null;
+    final gmail = result['gmail'];
+    gmailCheck = gmail is Map ? Map<String, dynamic>.from(gmail) : null;
     appliedHidden = (result['applied_hidden'] as num?)?.toInt() ?? 0;
     cached = false;
     error = null;
@@ -385,9 +391,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
           return;
         }
         setState(() {
-          final source = result['source'];
-          status =
-              '${source is String ? 'Fetching ${sourceName(source)}' : result['current']} · ${result['fetched']} collected';
+          status = progressLine(result);
           sources = result['sources'] as List;
           sourceTotal = (result['total'] as num?)?.toInt() ?? 0;
         });
@@ -919,8 +923,10 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
             const SizedBox(height: 8),
             Text(eligibilityLabel(j.text('eligibility'))),
             const SizedBox(height: 8),
-            const Text(
-              'Location labels come from listing text. Confirm the employer can hire from Romania.',
+            Text(
+              j.hybrid
+                  ? 'A hybrid role, from the listing\'s workplace type or text. Check the office days and where you would need to live.'
+                  : 'Location labels come from listing text. Confirm the employer can hire from Romania.',
             ),
             if (j.ai != null) ...[
               const SizedBox(height: 20),
@@ -928,13 +934,17 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                 "${engineLabel(j.ai!['engine']).toUpperCase()}'S TAKE · ${j.ai!['fit']}/100 · ${verdictLabel(j.ai!['verdict'].toString())}",
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
-              const SizedBox(height: 8),
-              Text(
-                romaniaLabel(
-                  j.ai!['romania'].toString(),
-                  engineLabel(j.ai!['engine']),
+              // A Malta hybrid role is worked from Malta, so "not open to
+              // Romania" would read as a problem it isn't.
+              if (j.text('eligibility') != 'hybrid-malta') ...[
+                const SizedBox(height: 8),
+                Text(
+                  romaniaLabel(
+                    j.ai!['romania'].toString(),
+                    engineLabel(j.ai!['engine']),
+                  ),
                 ),
-              ),
+              ],
               ...j.aiList('reasons').map((r) => Text('+ $r')),
               ...j.aiList('concerns').map((c) => Text('− $c')),
               const SizedBox(height: 8),
@@ -1229,7 +1239,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              '${options['remote_only'] ? 'Fully remote' : 'All work styles'}  /  ${options['eligibility'] == 'all'
+                              '${options['remote_only'] ? 'Fully remote' : 'All work styles'}${hybridSummary(options)}  /  ${options['eligibility'] == 'all'
                                   ? 'All locations'
                                   : options['eligibility'] == 'romania'
                                   ? 'Romania eligible'
@@ -1326,7 +1336,7 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                                           ? accent
                                           : Colors.orange.shade800,
                                     ),
-                                    title: Text(sourceName(s['name'])),
+                                    title: Text(sourceStatusName(s)),
                                     subtitle: Text(
                                       s['status'] == 'error' ||
                                               s['status'] == 'partial'
@@ -1467,6 +1477,19 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
                           style: const TextStyle(
                             fontSize: 12,
                             color: Colors.black54,
+                          ),
+                        ),
+                      ),
+                    if (tab == 0 && gmailCheck?['message'] is String)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          gmailCheck!['message'],
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: gmailCheck!['status'] == 'error'
+                                ? Colors.orange.shade900
+                                : Colors.black54,
                           ),
                         ),
                       ),
@@ -2142,8 +2165,33 @@ class _OptionsPageState extends State<OptionsPage> {
           toggle(
             'remote_only',
             'Fully remote only',
-            'Exclude hybrid, on-site, and unknown work styles.',
+            'Exclude hybrid, on-site, and unknown work styles, apart from the hybrid roles below.',
           ),
+          const Text(
+            'Also show hybrid roles based in:',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: hybridPlaces.entries
+                .map(
+                  (e) => FilterChip(
+                    label: Text(e.value),
+                    selected: (o['hybrid'] as List).contains(e.key),
+                    onSelected: (v) => setState(() {
+                      final places = o['hybrid'] as List;
+                      v ? places.add(e.key) : places.remove(e.key);
+                    }),
+                  ),
+                )
+                .toList(),
+          ),
+          const Text(
+            'LinkedIn searches each country once more (about 30 seconds each). Glassdoor adds Romania only, about a minute, since it lists no jobs in Malta.',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 8),
           toggle(
             'prefer_contract',
             'Put contracts first',

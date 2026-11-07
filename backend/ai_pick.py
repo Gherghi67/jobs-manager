@@ -83,9 +83,17 @@ def profile_text():
 def preferences(o):
     focus = {'backend': 'Node.js / TypeScript backend', 'broad': 'backend, AI, Python and Go', 'gaming': 'gaming-industry backend'}[o['preset']]
     lines = [f'- Role focus: {focus}' + (f'; skills: {o["keywords"]}' if o['keywords'].strip() else '')]
-    lines.append('- Fully remote only.' if o['remote_only'] else '- Remote, hybrid and on-site are all acceptable.')
+    hybrid = o.get('hybrid', [])
+    places = ' or '.join(p.title() for p in hybrid)
+    if o['remote_only']:
+        lines.append('- Fully remote only' + (f', except hybrid roles based in {places}.' if places else '.'))
+    else:
+        lines.append('- Remote, hybrid and on-site are all acceptable.')
+    if places:
+        lines.append(f'- Hybrid roles based in {places} are wanted: working part of the week from an office there '
+                     'is not a concern.')
     if o['eligibility'] != 'all':
-        lines.append('- Must be hireable from Romania.')
+        lines.append('- Must be hireable from Romania' + (', except hybrid roles based in Malta.' if 'malta' in hybrid else '.'))
     if o['contract_only']:
         lines.append('- Contract roles only.')
     elif o['prefer_contract']:
@@ -109,10 +117,11 @@ def build_prompt(listings, o, profile):
     return '\n'.join(parts)
 
 
-def run_claude(prompt, runner=subprocess.run, env=None):
+def run_claude(prompt, runner=subprocess.run, env=None, system=SYSTEM, schema=SCHEMA):
+    """One tool-less Claude request answering with JSON in schema. The Gmail sync passes its own system and schema."""
     cmd = ['claude', '-p', '--output-format', 'json', '--model', MODEL, '--effort', EFFORT,
            '--tools', '', '--no-session-persistence', '--strict-mcp-config', '--setting-sources', 'project',
-           '--system-prompt', SYSTEM, '--json-schema', json.dumps(SCHEMA)]
+           '--system-prompt', system, '--json-schema', json.dumps(schema)]
     try:
         # An empty working directory keeps project settings, hooks and CLAUDE.md files out of the call.
         with tempfile.TemporaryDirectory() as cwd:
@@ -126,18 +135,19 @@ def run_claude(prompt, runner=subprocess.run, env=None):
     except ValueError:
         raise AIError('Claude Code returned no result. Check that it is signed in on the service computer.')
     if not isinstance(result, dict):
-        raise AIError('Claude Code returned an invalid ranking.')
+        raise AIError('Claude Code returned an invalid answer.')
     output = result.get('structured_output')
     if done.returncode or result.get('is_error') or not isinstance(output, dict):
-        raise AIError('Claude Code: ' + ' '.join(str(result.get('result') or 'no ranking returned').split())[:200])
+        raise AIError('Claude Code: ' + ' '.join(str(result.get('result') or 'no answer returned').split())[:200])
     return output
 
 
-def run_codex(prompt, env, runner=subprocess.run):
+def run_codex(prompt, env, runner=subprocess.run, system=SYSTEM, schema=SCHEMA):
+    """One Codex request with tools, apps and user config off, answering with JSON in schema."""
     try:
         with tempfile.TemporaryDirectory() as cwd:
-            schema, answer = Path(cwd) / 'schema.json', Path(cwd) / 'answer.json'
-            schema.write_text(json.dumps(SCHEMA))
+            schema_file, answer = Path(cwd) / 'schema.json', Path(cwd) / 'answer.json'
+            schema_file.write_text(json.dumps(schema))
             cmd = ['codex', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
                    '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never',
                    '-c', 'approval_policy="never"', '-c', 'forced_login_method="chatgpt"',
@@ -147,21 +157,21 @@ def run_codex(prompt, env, runner=subprocess.run):
                    '-c', 'features.apps=false', '-c', 'features.plugins=false',
                    '-c', 'features.hooks=false', '-c', 'features.skip_host_skill_discovery=true',
                    '-c', 'project_doc_max_bytes=0',
-                   '--output-schema', str(schema), '--output-last-message', str(answer)]
+                   '--output-schema', str(schema_file), '--output-last-message', str(answer)]
             if CODEX_MODEL:
                 cmd += ['--model', CODEX_MODEL]
             cmd += ['-']
-            done = runner(cmd, input=SYSTEM + '\n\n' + prompt, capture_output=True, text=True,
+            done = runner(cmd, input=system + '\n\n' + prompt, capture_output=True, text=True,
                           cwd=cwd, env=env, timeout=TIMEOUT)
             if done.returncode:
                 # CLI stderr can contain local config/credential details; keep it off the phone.
-                raise AIError('Codex ranking failed. Check the selected ChatGPT login and usage limits on the service computer.')
+                raise AIError('Codex failed. Check the selected ChatGPT login and usage limits on the service computer.')
             try:
                 output = json.loads(answer.read_text())
             except (OSError, ValueError):
-                raise AIError('Codex returned no valid ranking.')
+                raise AIError('Codex returned no valid answer.')
             if not isinstance(output, dict):
-                raise AIError('Codex returned an invalid ranking.')
+                raise AIError('Codex returned an invalid answer.')
             return output
     except FileNotFoundError:
         raise AIError('Codex is not installed on the service computer.')
