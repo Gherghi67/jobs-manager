@@ -11,6 +11,7 @@ import 'api.dart';
 import 'adaptive.dart';
 import 'applications.dart' show shortDate;
 import 'paste.dart';
+import 'tailor.dart';
 
 const _ink = Color(0xFF172C2A);
 const _accent = Color(0xFF146B57);
@@ -143,11 +144,14 @@ class ClaudePage extends StatefulWidget {
   final JobsApi Function() api;
   final PhotoPicker pick;
   final PasteListener pastes;
+  // The chat to open, such as one tailoring the CV; otherwise the latest.
+  final String? chatId;
   const ClaudePage({
     super.key,
     required this.api,
     this.pick = pickPhotos,
     this.pastes = listenForPastedImages,
+    this.chatId,
   });
   @override
   State<ClaudePage> createState() => _ClaudePageState();
@@ -221,7 +225,9 @@ class _ClaudePageState extends State<ClaudePage> {
         loading = false;
       });
       // Pick up where the last conversation left off.
-      if (chats.isNotEmpty) {
+      if (widget.chatId != null) {
+        await open(widget.chatId!);
+      } else if (chats.isNotEmpty) {
         await open(chats.first['id'] as String);
       }
     } catch (e) {
@@ -732,10 +738,42 @@ class _ClaudePageState extends State<ClaudePage> {
     ];
   }
 
+  void notify(String text, {SnackBarAction? action}) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(text), action: action));
+  }
+
+  // The bar above a tailoring chat, with the CV's files once Claude builds them.
+  Widget tailorBar(Map<String, dynamic> tailor) {
+    final id = (tailor['id'] ?? '').toString();
+    final company = (tailor['company'] ?? '').toString();
+    return TailorBar(
+      tailor: tailor,
+      download: id.isEmpty
+          ? null
+          : () => unawaited(downloadTailored(api, id, company, notify)),
+      report: id.isEmpty
+          ? null
+          : () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ReportPage(
+                  api: widget.api,
+                  id: id,
+                  title: '$company — ${tailor['title']}',
+                ),
+              ),
+            ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final current = chat;
     final children = [for (final t in turns) ...turnWidgets(t)];
+    final tailor = current?['tailor'] is Map
+        ? Map<String, dynamic>.from(current!['tailor'] as Map)
+        : null;
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -773,6 +811,7 @@ class _ClaudePageState extends State<ClaudePage> {
             ? const Center(child: CircularProgressIndicator())
             : Column(
                 children: [
+                  if (tailor != null) tailorBar(tailor),
                   Expanded(
                     child: current == null
                         ? emptyState()

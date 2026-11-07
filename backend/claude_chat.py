@@ -18,6 +18,7 @@ import subprocess
 import threading
 
 import ai_pick as ai
+import tailor as tailoring
 
 ROOT = Path(__file__).resolve().parent
 CHATS_FILE = Path(os.environ.get('JOBS_CHATS_FILE') or ROOT / 'chats.json')
@@ -186,10 +187,10 @@ def apply(turn, event):
     return session if isinstance(session, str) and session else None
 
 
-def command(session_id):
+def command(session_id, extra=''):
     cmd = ['claude', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
            '--include-partial-messages', '--permission-mode', 'auto', '--permission-prompts', 'none',
-           '--model', MODEL, '--effort', EFFORT, '--append-system-prompt', PHONE]
+           '--model', MODEL, '--effort', EFFORT, '--append-system-prompt', PHONE + ('\n\n' + extra if extra else '')]
     if session_id:
         cmd += ['--resume', session_id]
     return cmd
@@ -197,9 +198,17 @@ def command(session_id):
 
 def summary(chat):
     last = chat['turns'][-1] if chat['turns'] else None
-    return dict(id=chat['id'], title=chat['title'], cwd=chat['cwd'], folder=Path(chat['cwd']).name or chat['cwd'],
-                created_at=chat['created_at'], updated_at=chat['updated_at'], turn_count=len(chat['turns']),
-                running=bool(last and last['status'] == 'running'))
+    row = dict(id=chat['id'], title=chat['title'], cwd=chat['cwd'], folder=Path(chat['cwd']).name or chat['cwd'],
+               created_at=chat['created_at'], updated_at=chat['updated_at'], turn_count=len(chat['turns']),
+               running=bool(last and last['status'] == 'running'))
+    if chat.get('tailor'):
+        # A tailoring chat: the CV folder it builds and whether its PDF and report are there yet.
+        info = chat['tailor']
+        found = tailoring.status(info['folder']) if info.get('folder') else None
+        row['tailor'] = dict(id=found['id'] if found else '', company=info.get('company', ''),
+                             title=info.get('title', ''), url=info.get('url', ''),
+                             pdf=bool(found and found['pdf']), report=bool(found and found['report']))
+    return row
 
 
 class ChatStore:
@@ -249,16 +258,22 @@ class ChatStore:
             start = max(0, min(start, len(chat['turns'])))
             return dict(summary(chat), start=start, turns=copy.deepcopy(chat['turns'][start:]))
 
-    def create(self, cwd, text, images=None):
-        if cwd not in {f['path'] for f in folders()}:
+    def create(self, cwd, text, images=None, tailor=None, title=None):
+        """A new chat in [cwd]. A tailoring chat ([tailor], from tailor.start) works in a CV folder instead
+        of one of the offered folders."""
+        if tailor is None and cwd not in {f['path'] for f in folders()}:
             raise ValueError('Choose one of the folders the service offers.')
+        if tailor is not None and not tailoring.inside(cwd):
+            raise ValueError('Tailoring chats work in the tailored CVs folder.')
         images = decode_images(images)
         self.check_text(text, images)
         with self.lock:
             stamp = now()
-            title = text.strip().splitlines()[0] if text.strip() else 'Photo' if len(images) == 1 else f'{len(images)} photos'
+            title = title or (text.strip().splitlines()[0] if text.strip() else 'Photo' if len(images) == 1 else f'{len(images)} photos')
             chat = dict(id=secrets.token_hex(8), title=clip(title, 80), cwd=cwd,
                         session_id='', created_at=stamp, updated_at=stamp, turns=[])
+            if tailor is not None:
+                chat['tailor'] = dict(tailor)
             self.check_capacity()
             self.load()[chat['id']] = chat
             try:
@@ -332,7 +347,8 @@ class ChatStore:
         chat['updated_at'] = turn['at']
         try:
             # A new process group, so Stop also ends the commands Claude started.
-            proc = self.popen(command(chat['session_id']), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            extra = tailoring.system_prompt(chat['tailor']) if chat.get('tailor') else ''
+            proc = self.popen(command(chat['session_id'], extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True, cwd=chat['cwd'], env=ai.clean_env(),
                               start_new_session=True)
         except OSError:
@@ -388,8 +404,24 @@ class ChatStore:
                     item.pop('live', None)
                 chat['updated_at'] = now()
                 self.procs.pop(chat['id'], None)
+                self.adopt(chat, turn)
                 if chat['id'] in self.load():
                     self.save()
+
+    def adopt(self, chat, turn):
+        """Links a pasted-posting tailoring chat to the CV folder its turn built, once there is one."""
+        info = chat.get('tailor')
+        if not info or info.get('folder'):
+            return
+        claimed = {c['tailor']['folder'] for c in self.load().values() if c.get('tailor', {}).get('folder')}
+        try:
+            folder = tailoring.adopt(turn['at'], claimed)
+            if folder:
+                found = tailoring.status(folder)
+                info.update(folder=str(folder), company=found['company'], title=found['title'])
+                tailoring.write_job(folder, info, chat['id'])
+        except OSError:
+            pass
 
     def kill(self, proc, turn, reason):
         with self.lock:
