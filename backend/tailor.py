@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import sys
 import unicodedata
 
 ROOT = Path(__file__).resolve().parent
@@ -257,6 +259,67 @@ def adopt(since, claimed):
         if stamp >= start and (best is None or stamp > best[0]):
             best = (stamp, folder)
     return best[1] if best else None
+
+
+def export_root():
+    """Where finished tailored CVs are also kept, in the same <Company>/<Role> folders: JOBS_TAILORED_EXPORT_DIR,
+    which scripts/serve.sh sets to ~/Documents/jobs-manager/cv/tailored. None when unset or the same folder."""
+    value = os.environ.get('JOBS_TAILORED_EXPORT_DIR', '').strip()
+    if not value:
+        return None
+    target = Path(value).expanduser()
+    return None if target.resolve() == root().resolve() else target
+
+
+def same_bytes(a, b):
+    with a.open('rb') as x, b.open('rb') as y:
+        while True:
+            chunk = x.read(1 << 16)
+            if chunk != y.read(1 << 16):
+                return False
+            if not chunk:
+                return True
+
+
+def export(folder):
+    """Copies [folder]'s finished PDF, under the main CV's file name, and its report into the export folder.
+    A copy there is replaced only by a newer, different file, so a file edited there is never overwritten by
+    an older build. Returns the paths written."""
+    target = export_root()
+    row = status(folder)
+    if target is None or not row or not row['pdf']:
+        return []
+    pdf, report = files(folder)
+    dest = target.joinpath(*row['id'].split('/'))
+    written = []
+    for src, name in ((pdf, pdf_name()), (report, REPORT)):
+        if src is None:
+            continue
+        out, have = dest / name, src.stat()
+        if out.is_file():
+            there = out.stat()
+            if there.st_mtime >= have.st_mtime or same_bytes(src, out):
+                continue
+        dest.mkdir(parents=True, exist_ok=True)
+        temp = dest / f'.{name}.tmp'
+        shutil.copy2(src, temp)
+        os.replace(temp, out)
+        written.append(out)
+    return written
+
+
+def export_all():
+    """Exports every tailored folder with a PDF, as at service start; returns the paths written."""
+    if export_root() is None:
+        return []
+    written = []
+    for row in listing():
+        if row['pdf']:
+            try:
+                written += export(root() / row['id'])
+            except OSError as e:
+                print(f'Could not copy the tailored CV {row["id"]}: {e}', file=sys.stderr, flush=True)
+    return written
 
 
 def start(store, body):

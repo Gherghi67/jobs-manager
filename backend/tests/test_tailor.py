@@ -35,7 +35,8 @@ class Folder(unittest.TestCase):
         self.popen = FakePopen()
         self.store = cc.ChatStore(Path(self.temp.name) / 'chats.json', popen=self.popen)
         for p in (patch.dict(os.environ, {'JOBS_CV_DIR': str(self.cv), 'JOBS_CLAUDE_ROOTS': str(self.docs),
-                                          'JOBS_TAILORED_DIR': '', 'ANTHROPIC_API_KEY': 'invalid'}),
+                                          'JOBS_TAILORED_DIR': '', 'JOBS_TAILORED_EXPORT_DIR': '',
+                                          'ANTHROPIC_API_KEY': 'invalid'}),
                   patch.object(cc.ai, 'available', return_value=True)):
             p.start()
             self.addCleanup(p.stop)
@@ -177,6 +178,69 @@ class StartTests(Folder):
             self.store.create(str(self.docs), 'Hi', tailor=dict(folder=''))
         with self.assertRaises(ValueError):
             self.store.create(str(self.root), 'Hi')
+
+
+class ExportTests(Folder):
+    def setUp(self):
+        super().setUp()
+        self.out = Path(self.temp.name) / 'Documents' / 'jobs-manager' / 'cv' / 'tailored'
+        p = patch.dict(os.environ, {'JOBS_TAILORED_EXPORT_DIR': str(self.out)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def built(self, company='LSEG', role='Software_Engineer', pdf_file='cv.pdf'):
+        folder = self.root / company / role
+        folder.mkdir(parents=True)
+        (folder / pdf_file).write_bytes(PDF)
+        (folder / 'Report.md').write_text('# Report\n')
+        return folder
+
+    def test_a_finished_cv_and_its_report_are_copied_under_the_main_cv_name(self):
+        self.built()
+        (self.root / 'Draft' / 'Role').mkdir(parents=True)
+        (self.root / 'Draft' / 'Role' / 'Report.md').write_text('# No PDF yet\n')
+        dest = self.out / 'LSEG' / 'Software_Engineer'
+        self.assertEqual(sorted(tailor.export_all()), [dest / 'Jane-Doe-CV.pdf', dest / 'Report.md'])
+        self.assertEqual(((dest / 'Jane-Doe-CV.pdf').read_bytes(), (dest / 'Report.md').read_text()),
+                         (PDF, '# Report\n'))
+        self.assertFalse((self.out / 'Draft').exists())
+        # Nothing changed, nothing copied again.
+        self.assertEqual(tailor.export_all(), [])
+
+    def test_a_newer_build_replaces_the_copy_but_a_newer_file_there_is_kept(self):
+        folder = self.built()
+        tailor.export_all()
+        copy = self.out / 'LSEG' / 'Software_Engineer' / 'Jane-Doe-CV.pdf'
+        copy.write_bytes(b'%PDF edited by hand')
+        os.utime(copy, (time.time() + 60, time.time() + 60))
+        self.assertEqual(tailor.export(folder), [])
+        self.assertEqual(copy.read_bytes(), b'%PDF edited by hand')
+        (folder / 'cv.pdf').write_bytes(b'%PDF rebuilt')
+        os.utime(folder / 'cv.pdf', (time.time() + 120, time.time() + 120))
+        self.assertEqual(tailor.export(folder), [copy])
+        self.assertEqual(copy.read_bytes(), b'%PDF rebuilt')
+
+    def test_nothing_is_copied_without_an_export_folder_or_onto_itself(self):
+        self.built()
+        with patch.dict(os.environ, {'JOBS_TAILORED_EXPORT_DIR': ''}):
+            self.assertEqual(tailor.export_all(), [])
+        with patch.dict(os.environ, {'JOBS_TAILORED_EXPORT_DIR': str(self.root)}):
+            self.assertEqual(tailor.export_all(), [])
+        self.assertFalse(self.out.exists())
+
+    def test_the_turn_that_builds_the_pdf_copies_it(self):
+        self.popen.queue(FakeProc([result('1. Have you used Kafka?', session='s1')]))
+        chat, _ = tailor.start(self.store, {'job': JOB})
+        finished(self.store, chat['id'])
+        dest = self.out / 'Stefan_Co_EU' / 'Senior_Nodejs_Backend_Engineer'
+        self.assertFalse(dest.exists())
+        proc = self.popen.queue(FakeProc([result('Your CV is ready.', session='s1')], hold=True))
+        self.store.send(chat['id'], '1. No.')
+        folder = self.root / 'Stefan_Co_EU' / 'Senior_Nodejs_Backend_Engineer'
+        (folder / 'Jane-Doe-CV.pdf').write_bytes(PDF)
+        proc.release.set()
+        finished(self.store, chat['id'])
+        self.assertEqual((dest / 'Jane-Doe-CV.pdf').read_bytes(), PDF)
 
 
 class ListingTests(Folder):

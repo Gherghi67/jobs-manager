@@ -15,6 +15,7 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 
 import ai_pick as ai
@@ -25,7 +26,6 @@ CHATS_FILE = Path(os.environ.get('JOBS_CHATS_FILE') or ROOT / 'chats.json')
 MODEL = os.environ.get('JOBS_CHAT_MODEL') or 'claude-opus-5-5'
 EFFORT = os.environ.get('JOBS_CHAT_EFFORT') or 'xhigh'
 TURN_TIMEOUT = 30 * 60
-MAX_RUNNING = 3
 PROMPT_CHARS = 20000
 TEXT_CHARS = 60000
 TOOL_CHARS = 300
@@ -274,7 +274,6 @@ class ChatStore:
                         session_id='', created_at=stamp, updated_at=stamp, turns=[])
             if tailor is not None:
                 chat['tailor'] = dict(tailor)
-            self.check_capacity()
             self.load()[chat['id']] = chat
             try:
                 return self.start(chat, text, images)
@@ -292,7 +291,6 @@ class ChatStore:
                 return None
             if chat['turns'] and chat['turns'][-1]['status'] == 'running':
                 raise RuntimeError('Claude is still answering. Wait, or stop it first.')
-            self.check_capacity()
             return self.start(chat, text, images)
 
     @staticmethod
@@ -302,10 +300,6 @@ class ChatStore:
             raise ValueError('Write a message first.')
         if len(text) > PROMPT_CHARS:
             raise ValueError(f'Messages are limited to {PROMPT_CHARS:,} characters.')
-
-    def check_capacity(self):
-        if len(self.procs) >= MAX_RUNNING:
-            raise RuntimeError(f'{MAX_RUNNING} chats are already running. Wait for one to finish.')
 
     def save_images(self, chat, images):
         """Keeps each upload, so the app can show it in the chat and Claude can find it by path."""
@@ -407,6 +401,18 @@ class ChatStore:
                 self.adopt(chat, turn)
                 if chat['id'] in self.load():
                     self.save()
+            self.export(chat)
+
+    @staticmethod
+    def export(chat):
+        """Copies the CV a tailoring turn finished to the export folder (see tailor.export)."""
+        folder = (chat.get('tailor') or {}).get('folder')
+        if not folder:
+            return
+        try:
+            tailoring.export(folder)
+        except OSError as e:
+            print(f'Could not copy the tailored CV in {folder}: {e}', file=sys.stderr, flush=True)
 
     def adopt(self, chat, turn):
         """Links a pasted-posting tailoring chat to the CV folder its turn built, once there is one."""

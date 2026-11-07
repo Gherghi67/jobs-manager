@@ -228,6 +228,15 @@ class StoreTests(unittest.TestCase):
         turn = finished(self.store, chat['id'])['turns'][0]
         self.assertEqual((turn['status'], turn['items']), ('stopped', [{'kind': 'text', 'text': 'Working'}]))
 
+    def test_any_number_of_chats_can_answer_at_once(self):
+        procs = [self.popen.queue(FakeProc([result(f'Answer {n}')], hold=True)) for n in range(6)]
+        chats = [self.store.create(self.project(), f'Task {n}') for n in range(6)]
+        self.assertEqual(sum(c['running'] for c in self.store.list()), 6)
+        for proc in procs:
+            proc.release.set()
+        for n, chat in enumerate(chats):
+            self.assertEqual(finished(self.store, chat['id'])['turns'][0]['items'], [{'kind': 'text', 'text': f'Answer {n}'}])
+
     def test_running_turns_become_interrupted_after_a_restart(self):
         proc = self.popen.queue(FakeProc([text_delta('Half'), result()], hold=True))
         chat = self.store.create(self.project(), 'Task')

@@ -1249,6 +1249,8 @@ def main():
     Handler.gmail = Handler.engine.gmail = gmail_sync.GmailSync(Handler.engine.applied, choice=gmail_choice,
                                                                 password=gmail_password)
     Handler.gmail.start()
+    # Catches up on tailored CVs finished while the service was down or before the export folder was set.
+    threading.Thread(target=tailor.export_all, name='tailored-export', daemon=True).start()
     server.serve_forever()
 
 if __name__ == '__main__':

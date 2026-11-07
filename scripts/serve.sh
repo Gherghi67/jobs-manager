@@ -21,7 +21,9 @@ if [ -z "${JOBS_GMAIL_APP_PASSWORD:-}" ] && command -v security >/dev/null; then
     JOBS_GMAIL_APP_PASSWORD=$(security find-internet-password -s imap.gmail.com -w 2>/dev/null) ||
     JOBS_GMAIL_APP_PASSWORD=$(security find-generic-password -s invoice-script-smtp -w 2>/dev/null) || JOBS_GMAIL_APP_PASSWORD=""
 fi
-export ADZUNA_APP_ID ADZUNA_APP_KEY JOBS_GMAIL_APP_PASSWORD
+# Finished tailored CVs are also copied to the user's own folder, one <Company>/<Role> folder each.
+JOBS_TAILORED_EXPORT_DIR="${JOBS_TAILORED_EXPORT_DIR-$HOME/Documents/jobs-manager/cv/tailored}"
+export ADZUNA_APP_ID ADZUNA_APP_KEY JOBS_GMAIL_APP_PASSWORD JOBS_TAILORED_EXPORT_DIR
 # Keep the Mac awake while the service runs. exec keeps this PID, so caffeinate exits with the service.
 if command -v caffeinate >/dev/null; then
   env -u JOBS_GMAIL_APP_PASSWORD caffeinate -is -w $$ &
