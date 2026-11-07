@@ -17,6 +17,7 @@ import 'claude_chat.dart';
 import 'downloads.dart';
 import 'models.dart';
 import 'stats.dart';
+import 'tailor.dart';
 import 'updater.dart';
 
 void main() => runApp(const JobsApp());
@@ -763,14 +764,103 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
     }
   }
 
-  // Claude Code on the service's computer, in a chat page of its own.
-  void openClaude() {
+  // Claude Code on the service's computer, in a chat page of its own; on
+  // [chatId] when given, such as a chat tailoring the CV.
+  void openClaude([String? chatId]) {
     if (token.isEmpty) {
       notify('Connect your job service in Options to talk to Claude.');
       return;
     }
-    Navigator.of(context)
-        .push(MaterialPageRoute<void>(builder: (_) => ClaudePage(api: api)));
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ClaudePage(api: api, chatId: chatId),
+      ),
+    );
+  }
+
+  // Has Claude tailor the CV to [job], or to a posting pasted in a dialog,
+  // then opens the chat where it asks its questions and builds the PDF.
+  Future<void> tailorCv({Job? job}) async {
+    if (token.isEmpty) {
+      notify('Connect your job service in Options to tailor your CV.');
+      return;
+    }
+    String? posting;
+    if (job == null) {
+      posting = await askForPosting(context);
+      if (posting == null) {
+        return;
+      }
+    } else if (!await confirmTailoring(
+      context,
+      role: '${job.text('title')} at ${job.text('company')}',
+    )) {
+      return;
+    }
+    final api = this.api();
+    try {
+      final started = await startTailoring(
+        api,
+        job: job?.data,
+        posting: posting,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (started.existing) {
+        notify('Opened the chat already tailoring your CV for this role.');
+      }
+      openClaude(started.id);
+    } catch (e) {
+      notify(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      api.close();
+    }
+  }
+
+  // The CV button: the main CV, tailoring for a pasted posting, and every
+  // tailored CV with its PDF, report and chat.
+  void openCvs() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheet) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .6,
+        maxChildSize: .9,
+        builder: (sheet, controller) => CvSheet(
+          api: api,
+          controller: controller,
+          downloadMain: () {
+            Navigator.pop(sheet);
+            unawaited(downloadCv());
+          },
+          download: (cv) async {
+            Navigator.pop(sheet);
+            final api = this.api();
+            try {
+              await downloadTailored(
+                api,
+                cv['id'] as String,
+                cv['company'].toString(),
+                notify,
+              );
+            } finally {
+              api.close();
+            }
+          },
+          openChat: (id) {
+            Navigator.pop(sheet);
+            openClaude(id);
+          },
+          tailorPosting: () async {
+            Navigator.pop(sheet);
+            await tailorCv();
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> openCv(String uri) async {
@@ -871,6 +961,15 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
               onPressed: () => openLink(j.text('url')),
               icon: const Icon(Icons.open_in_new),
               label: const Text('Open original listing'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                unawaited(tailorCv(job: j));
+              },
+              icon: const Icon(Icons.auto_fix_high),
+              label: const Text('Tailor CV for this job'),
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -1013,8 +1112,8 @@ class _JobsHomeState extends State<JobsHome> with WidgetsBindingObserver {
             icon: const Icon(Icons.forum_outlined),
           ),
           IconButton(
-            tooltip: 'Download your CV',
-            onPressed: savingCv ? null : downloadCv,
+            tooltip: 'Your CVs',
+            onPressed: savingCv ? null : openCvs,
             icon: const Icon(Icons.description_outlined),
           ),
           IconButton(

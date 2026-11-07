@@ -375,12 +375,17 @@ void main() {
           },
         );
       }
+      if (r.url.path == '/tailored') {
+        return http.Response(jsonEncode({'cvs': []}), 200);
+      }
       return http.Response(jsonEncode({'jobs': []}), 200);
     });
     SharedPreferences.setMockInitialValues({'token': 'test-token'});
     await tester.pumpWidget(JobsApp(httpClient: () => client));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Download your CV'));
+    await tester.tap(find.byTooltip('Your CVs'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Download your CV'));
     await tester.pumpAndSettle();
     expect(calls.single.method, 'save');
     expect(calls.single.arguments, {

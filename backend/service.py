@@ -41,6 +41,7 @@ import glassdoor
 import gmail_sync
 import jev
 import linkedin
+import tailor
 
 PUBLIC_SOURCES = ['remotive', 'remoteok', 'himalayas', 'jobicy', 'workingnomads', 'arbeitnow', 'hackernews']
 # Removed boards that options saved by older app builds may still list.
@@ -947,6 +948,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_file(cv, 'application/pdf', missing, f'attachment; filename="{download_name(cv)}"')
         elif path.startswith('/claude/'):
             self.claude('GET', path)
+        elif path == '/tailored' or path.startswith('/tailored/'):
+            self.tailored(path)
         elif path == '/search/latest':
             have = parse_qs(urlparse(self.path).query).get('have', [''])[0]
             self.respond(200, self.engine.latest(have))
@@ -983,6 +986,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(202, self.gmail.status())
         if path.startswith('/claude/'):
             return self.claude('POST', path)
+        if path == '/tailor':
+            return self.start_tailoring()
         parts = path.strip('/').split('/')
         if len(parts) == 3 and parts[0] == 'search' and parts[2] == 'cancel':
             run = self.engine.cancel(parts[1])
@@ -1049,6 +1054,43 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             raise ValueError('Invalid request.')
         return body
+    def tailored(self, path):
+        """Tailored CVs: the list, and each one's PDF and report."""
+        parts = path.strip('/').split('/')[1:]
+        if not parts:
+            return self.respond(200, {'cvs': tailor.listing()})
+        folder = tailor.find(*parts[:2]) if len(parts) == 3 else None
+        missing = {'error': 'This tailored CV is no longer on the service.'}
+        if folder is None:
+            return self.respond(404, missing)
+        if parts[2] == 'cv':
+            pdf, _ = tailor.files(folder)
+            if pdf is None:
+                return self.respond(404, {'error': 'Claude has not built this PDF yet.'})
+            return self.send_file(pdf, 'application/pdf', missing,
+                                  f'attachment; filename="{download_name(Path(tailor.pdf_name()))}"')
+        if parts[2] == 'report':
+            text = tailor.report_text(folder)
+            return self.respond(200 if text is not None else 404,
+                                {'text': text} if text is not None else {'error': 'This CV has no report yet.'})
+        self.respond(404, {'error': 'Not found'})
+    def start_tailoring(self):
+        """Starts a Claude page chat that tailors the CV to a job, or reopens the one already doing it."""
+        if not claude_chat.enabled():
+            return self.respond(403, {'error': 'The Claude page is switched off on the service (JOBS_CLAUDE_CHAT).'})
+        try:
+            chat, existing = tailor.start(self.chats, self.read_json(65536))
+            self.respond(200 if existing else 202, {'chat': chat, 'existing': existing})
+        except json.JSONDecodeError:
+            self.respond(400, {'error': 'Invalid request.'})
+        except ValueError as exc:
+            self.respond(400, {'error': str(exc)})
+        except RuntimeError as exc:
+            self.respond(409, {'error': str(exc)})
+        except claude_chat.ChatError as exc:
+            self.respond(503, {'error': str(exc)})
+        except OSError:
+            self.respond(500, {'error': 'The tailored CV folder could not be created on the service computer.'})
     def claude(self, method, path):
         """The Claude page: chats with Claude Code on this computer, in a folder the service offers."""
         if not claude_chat.enabled():
