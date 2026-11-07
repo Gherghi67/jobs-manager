@@ -172,10 +172,19 @@ class PickTests(unittest.TestCase):
         self.assertIn('Senior Node.js engineer in Romania.', prompt)
         self.assertIn('skills: Rust', prompt)
         self.assertIn('- Contract roles only.', prompt)
-        self.assertIn('- Must be hireable from Romania.', prompt)
+        self.assertIn('- Fully remote only, except hybrid roles based in Romania or Malta.', prompt)
+        self.assertIn('- Hybrid roles based in Romania or Malta are wanted', prompt)
+        self.assertIn('- Must be hireable from Romania, except hybrid roles based in Malta.', prompt)
         self.assertIn('Salary: €80/h', prompt)
         self.assertIn('[truncated]', prompt)
         self.assertLess(len(prompt), 3000)
+
+    def test_without_hybrid_places_the_preferences_stay_remote_only(self):
+        text = ai.preferences(dict(self.options, hybrid=[]))
+        self.assertIn('- Fully remote only.', text)
+        self.assertIn('- Must be hireable from Romania.', text)
+        self.assertNotIn('ybrid', text)
+        self.assertIn('- Must be hireable from Romania.', ai.preferences(dict(self.options, hybrid=['romania'])))
 
 
 class EngineAiTests(unittest.TestCase):

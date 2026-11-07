@@ -283,6 +283,77 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('hybrid roles name their country, and a country can be dropped', (
+    tester,
+  ) async {
+    final job = {
+      'id': 'malta',
+      'title': 'Senior Backend Engineer',
+      'company': 'Harbour Games',
+      'location': 'Sliema, Malta (Hybrid)',
+      'eligibility': 'hybrid-malta',
+      'remote': 'hybrid',
+      'type': 'full-time',
+      'score': 10,
+      'sources': ['linkedin'],
+      'matched': {
+        'core': ['node.js'],
+      },
+      'description': 'Build game services.',
+      'url': 'https://www.linkedin.com/jobs/view/4400000001/',
+    };
+    SharedPreferences.setMockInitialValues({
+      'jobs': jsonEncode([job]),
+      'sources': jsonEncode([
+        {'name': 'linkedin', 'status': 'ok', 'count': 25, 'cached': false},
+        {
+          'name': 'linkedin',
+          'place': 'malta',
+          'status': 'ok',
+          'count': 7,
+          'cached': false,
+        },
+      ]),
+      'updated': '2026-11-07T10:00:00Z',
+    });
+    await tester.pumpWidget(const JobsApp());
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Fully remote + hybrid in Romania, Malta  /'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('2/2 sources responded'));
+    await tester.pumpAndSettle();
+    expect(find.text('LinkedIn'), findsOneWidget);
+    expect(find.text('LinkedIn · hybrid in Malta'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Hybrid · Malta'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Hybrid · Malta'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Search options'));
+    await tester.pumpAndSettle();
+    final malta = find.widgetWithText(FilterChip, 'Malta');
+    await tester.scrollUntilVisible(
+      malta,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(tester.widget<FilterChip>(malta).selected, isTrue);
+    await tester.tap(malta);
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilterChip>(malta).selected, isFalse);
+    expect(
+      tester
+          .widget<FilterChip>(find.widgetWithText(FilterChip, 'Romania'))
+          .selected,
+      isTrue,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('options offer the Claude ranking switch', (tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(const JobsApp());
@@ -797,6 +868,11 @@ void main() {
     SharedPreferences.setMockInitialValues({
       'jobs': jsonEncode([]),
       'applied_hidden': 2,
+      'gmail_check': jsonEncode({
+        'status': 'error',
+        'message':
+            'Gmail check failed: Sign into the configured Claude subscription.',
+      }),
       'updated': '2026-10-09T10:00:00Z',
     });
     await tester.pumpWidget(const JobsApp());
@@ -810,6 +886,12 @@ void main() {
       find.text('Left out 2 roles you already applied to.'),
       findsOneWidget,
     );
+    final gmail = tester.widget<Text>(
+      find.text(
+        'Gmail check failed: Sign into the configured Claude subscription.',
+      ),
+    );
+    expect(gmail.style?.color, Colors.orange.shade900);
     expect(tester.takeException(), isNull);
   });
 

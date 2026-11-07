@@ -15,3 +15,5 @@ Gotcha (Claude Code 2.1.295, 2026-10-09): when the connector session expired and
 Wrong-mailbox symptom (2026-10-12): in a conversation whose session email was the @erepubliklabs.com address, `get_thread` on thread ids stored in `backend/applied.json` returned "Requested entity was not found", and a search for known senders (Voodoo, Modash, Proxify) returned `{}`. The connector was on a different mailbox. Re-link it to the personal account through `/mcp` and restart Claude Code before relying on it. Don't conclude that the emails are gone.
 
 The applications imported from that mailbox are described in [[project-fieldwork]].
+
+Since 2026-10-22 Fieldwork's Gmail sync no longer uses this connector: it reads the mailbox over IMAP with an app password (see [[project-fieldwork]]). The connector still matters for reading mail in a Claude Code conversation like this one.

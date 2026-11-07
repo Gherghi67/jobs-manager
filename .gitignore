@@ -71,3 +71,6 @@ backend/gmail-sync-state.json*
 backend/gmail-sync-preview.json
 backend/jev-usage.json*
 backend/search.json*
+.cs/private/
+.cs/session.lock
+.cs/session.mutex.lock

@@ -27,6 +27,36 @@ const sourceNames = <String, String>{
 
 String sourceName(String key) => sourceNames[key] ?? key;
 
+// Countries where a search also takes hybrid roles, beside the remote ones.
+const hybridPlaces = <String, String>{'romania': 'Romania', 'malta': 'Malta'};
+
+// The line under the search bar while a search runs. The run names its
+// source in 'source' (a source status names it in 'name').
+String progressLine(Map run) {
+  final source = run['source'];
+  final step = source is String
+      ? 'Fetching ${sourceStatusName({'name': source, 'place': run['place']})}'
+      : run['current'];
+  return '$step · ${run['fetched']} collected';
+}
+
+// The header's note on the hybrid countries a search adds, if any.
+String hybridSummary(Map options) {
+  final places = (options['hybrid'] as List? ?? [])
+      .map((p) => hybridPlaces[p])
+      .whereType<String>()
+      .toList();
+  return places.isEmpty ? '' : ' + hybrid in ${places.join(', ')}';
+}
+
+// A source line from the service: LinkedIn and Glassdoor search once for
+// remote roles and once more for hybrid roles in each country.
+String sourceStatusName(Map status) {
+  final place = hybridPlaces[status['place']];
+  final name = sourceName(status['name'].toString());
+  return place == null ? name : '$name · hybrid in $place';
+}
+
 String plural(int count, String one, [String? many]) =>
     '$count ${count == 1 ? one : many ?? '${one}s'}';
 
@@ -40,6 +70,7 @@ Map<String, dynamic> defaultOptions() => {
   'keywords': '',
   'remote_only': true,
   'eligibility': 'romania',
+  'hybrid': hybridPlaces.keys.toList(),
   'contract_only': false,
   'prefer_contract': true,
   'max_age_days': 30,
@@ -61,6 +92,8 @@ List<String> recentDismissed(Set<String> dismissed) => dismissed
     .toList();
 
 String eligibilityLabel(String value) => switch (value) {
+  'hybrid-romania' => 'Hybrid · Romania',
+  'hybrid-malta' => 'Hybrid · Malta',
   'worldwide' => 'Worldwide',
   'europe' => 'Romania / Europe',
   'us' => 'US / Americas only',
@@ -168,7 +201,9 @@ class Job {
   List<String> get sources =>
       List<String>.from(data['sources'] ?? [data['source']]);
   List<String> get matches => List<String>.from(data['matched']?['core'] ?? []);
-  bool get eligible => ['worldwide', 'europe'].contains(text('eligibility'));
+  bool get eligible =>
+      ['worldwide', 'europe'].contains(text('eligibility')) || hybrid;
+  bool get hybrid => text('eligibility').startsWith('hybrid-');
   // An entry from an application email, for a whole company; see [match].
   bool get companyWide => data['scope'] == 'company';
   String get match => (data['match'] ?? 'company').toString();

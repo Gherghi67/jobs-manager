@@ -6,8 +6,9 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -59,6 +60,43 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(rows[0]['location'], 'Remote, Berlin')
         self.options['eligibility'] = 'romania_unclear'
         self.assertEqual(s.rank(rows, self.options), [])
+
+    def test_hybrid_roles_in_romania_and_malta_join_the_remote_ones(self):
+        rows = [job(),
+                job(company='Bucharest', location='Bucharest, Romania', description='TypeScript Node.js backend. Hybrid work model, 2 days a week in the office.'),
+                job(company='Malta', location='Sliema, Malta', title='Senior TypeScript Backend Engineer (Hybrid)'),
+                job(company='Berlin', location='Berlin, Germany', description='TypeScript Node.js backend. Hybrid work model.'),
+                job(company='Onsite', location='Bucharest, Romania', description='TypeScript Node.js backend, on-site in our office.'),
+                job(company='Cloud', location='Bucharest, Romania', description='TypeScript Node.js backend for our hybrid cloud platform.'),
+                job(company='Regim', location='Cluj-Napoca, Cluj, România', description='TypeScript Node.js backend, regim hibrid.')]
+        ranked = s.rank(rows, self.options)
+        self.assertEqual({r['company']: (r['eligibility'], r['remote']) for r in ranked},
+                         {'Studio': ('europe', 'yes'), 'Bucharest': ('hybrid-romania', 'hybrid'),
+                          'Malta': ('hybrid-malta', 'hybrid'), 'Regim': ('hybrid-romania', 'hybrid')})
+        self.options['hybrid'] = ['romania']
+        self.assertEqual({r['company'] for r in s.rank(rows, self.options)}, {'Studio', 'Bucharest', 'Regim'})
+        self.options['hybrid'] = []
+        self.assertEqual([r['company'] for r in s.rank(rows, self.options)], ['Studio'])
+
+    def test_a_workplace_type_from_the_site_decides(self):
+        rows = [job(company='Onsite', location='Bucharest, Romania (On-site)', description='TypeScript Node.js backend. Hybrid work model.'),
+                job(company='Malta', location="Ta' Xbiex, Malta (Hybrid)"),
+                job(company='Remote', location='Romania (Remote)', description='TypeScript Node.js backend. Hybrid work model.')]
+        ranked = s.rank(rows, self.options)
+        self.assertEqual({r['company']: r['eligibility'] for r in ranked}, {'Malta': 'hybrid-malta'})
+        self.assertEqual(s.hybrid_place(rows[2], ['romania']), None)
+
+    def test_hybrid_roles_rank_with_the_eligible_ones(self):
+        self.options['eligibility'] = 'romania_unclear'
+        ranked = s.rank([job(company='Unclear', location='Remote'), job(company='Valletta', location='Valletta, Malta', description='TypeScript backend, hybrid (3 days in office)')], self.options)
+        self.assertEqual([r['company'] for r in ranked], ['Valletta', 'Unclear'])
+
+    def test_hybrid_places_validated(self):
+        self.assertEqual(s.validate_options({})['hybrid'], ['romania', 'malta'])
+        self.assertEqual(s.validate_options({'hybrid': ['malta', 'malta']})['hybrid'], ['malta'])
+        for hybrid in ('malta', ['germany'], [1], [['malta']], None):
+            with self.subTest(hybrid=hybrid), self.assertRaises(ValueError):
+                s.validate_options({'hybrid': hybrid})
 
     def test_bad_options_rejected(self):
         for options in [{'boards': ['evil']}, {'adzuna': 'yes'}, {'max_age_days': True}, {'countries': []}, {'keywords': 1}, {'preset': 'bad'}, {'unknown': 1},
@@ -282,6 +320,49 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(seen, ['Fresh'])
         self.assertEqual([j['company'] for j in result['jobs']], ['Fresh'])
         self.assertEqual(result['applied_hidden'], 1)
+
+    def test_applications_found_in_gmail_are_left_out_before_claude(self):
+        engine = s.Engine(self.store())
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive']})
+        engine.runs['x'] = {}
+        fetched, seen = threading.Event(), []
+        class Gmail:
+            def run_for_search(self, ai_engine, ai_subscription):
+                self.choice = (ai_engine, ai_subscription)
+                # Finishes after the sources, so the search has to wait for it.
+                fetched.wait(5)
+                time.sleep(0.2)
+                engine.applied.add({'scope': 'company', 'company': 'Studio', 'title': 'Backend Engineer'})
+                return dict(status='ok', imported=1, message='Checked Gmail: 1 new application email.')
+        engine.gmail = Gmail()
+        def remotive(*args):
+            fetched.set()
+            return [job(), job(company='Fresh', url='https://example.com/fresh')]
+        def pick(jobs, o, cache, runner=None):
+            seen.extend(j['company'] for j in jobs)
+            return jobs, dict(status='ok', ranked=len(jobs), shortlist=len(jobs))
+        with patch.dict(s.remote.SOURCES, {'remotive': remotive}), patch.object(s.ai, 'pick', pick):
+            engine.run('x', o)
+        result = engine.get('x')
+        self.assertEqual(seen, ['Fresh'])
+        self.assertEqual(([j['company'] for j in result['jobs']], result['applied_hidden']), (['Fresh'], 1))
+        self.assertEqual(result['gmail'], dict(status='ok', imported=1, message='Checked Gmail: 1 new application email.'))
+        # The Gmail check sorts with the engine and subscription picked for this search.
+        self.assertEqual(engine.gmail.choice, ('claude', 'personal'))
+
+    def test_a_slow_gmail_check_does_not_hold_the_search(self):
+        engine = s.Engine(self.store())
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False})
+        engine.runs['x'] = {}
+        release = threading.Event()
+        self.addCleanup(release.set)
+        engine.gmail = Mock(run_for_search=lambda *a: release.wait(5) and None)
+        with patch.dict(s.remote.SOURCES, {'remotive': lambda *a: [job()]}), patch.object(s, 'GMAIL_WAIT', 0.1):
+            engine.run('x', o)
+        result = engine.get('x')
+        self.assertEqual((result['status'], [j['company'] for j in result['jobs']]), ('complete', ['Studio']))
+        self.assertEqual(result['gmail']['status'], 'error')
+        self.assertIn('still running', result['gmail']['message'])
 
     def test_badged_roles_stay_last_after_claude(self):
         engine = s.Engine(self.store())

@@ -60,6 +60,23 @@ class RequestTests(unittest.TestCase):
         o = s.validate_options({'remote_only': False, 'preset': 'gaming'})
         self.assertEqual(glassdoor.request(o)['query'], 'game backend engineer')
 
+    def test_a_hybrid_search_names_its_country(self):
+        o = s.validate_options({'keywords': 'Node.js, NestJS'})
+        self.assertEqual(glassdoor.request(o, 'malta'), dict(query='Node.js hybrid', location='Malta', limit=glassdoor.LIMIT))
+        req = glassdoor.request(s.validate_options({}), 'malta')
+        self.assertIn('"backend engineer hybrid" in Malta', glassdoor.goal(req))
+        url = 'https://www.glassdoor.com/Job/malta-backend-engineer-hybrid-jobs-SRCH_IL.0,5_IN157_KO6,29.htm'
+        self.assertTrue(glassdoor.searched(url, req))
+        with self.assertRaises(glassdoor.GlassdoorError):
+            glassdoor.check_results(RESULTS.replace('remote', 'hybrid'), req)
+
+    def test_a_hybrid_role_in_romania_passes_ranking(self):
+        rows = glassdoor.to_jobs([item(title='Senior Backend Engineer', description='Node.js and TypeScript services. '
+                                       'Hybrid work model: 2 days a week in our Bucharest office.')], s.remote.job)
+        ranked = s.rank(rows, s.validate_options({}))
+        self.assertEqual([r['eligibility'] for r in ranked], ['hybrid-romania'])
+        self.assertEqual(s.rank(rows, s.validate_options({'hybrid': ['malta']})), [])
+
     def test_goal_names_the_search_and_forbids_account_changes(self):
         goal = glassdoor.goal(dict(query='backend engineer remote', location='Romania', limit=25))
         self.assertIn('"backend engineer remote" in Romania', goal)
@@ -173,8 +190,8 @@ class EngineTests(unittest.TestCase):
         self.engine.runs['x'] = {}
 
     def run_search(self, fetch, **options):
-        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, **options})
-        def linkedin_fetch(o, job, record=None, runner=None):
+        o = s.validate_options({'adzuna': False, 'boards': ['remotive'], 'ai_pick': False, 'hybrid': [], **options})
+        def linkedin_fetch(o, job, record=None, runner=None, place=None):
             record(dict(requests=2, input_tokens=9000))
             return [], []
         with patch.object(linkedin, 'enabled', return_value=True), patch.object(linkedin, 'fetch', linkedin_fetch), \
@@ -184,7 +201,7 @@ class EngineTests(unittest.TestCase):
         return self.engine.get('x')
 
     def test_glassdoor_runs_after_linkedin_and_its_roles_are_ranked(self):
-        def fetch(o, job, record=None, runner=None):
+        def fetch(o, job, record=None, runner=None, place=None):
             record(dict(requests=3, input_tokens=15000, source='glassdoor'))
             return glassdoor.to_jobs([item()], job), []
         result = self.run_search(fetch)
@@ -193,13 +210,24 @@ class EngineTests(unittest.TestCase):
         usage = self.engine.jev_usage.summary()
         self.assertEqual((usage['last']['source'], usage['total']['runs'], usage['total']['requests']), ('glassdoor', 2, 5))
 
+    def test_glassdoor_searches_romania_for_hybrid_roles_but_not_malta(self):
+        places = []
+        def fetch(o, job, record=None, runner=None, place=None):
+            places.append(place)
+            return [], []
+        result = self.run_search(fetch, hybrid=['romania', 'malta'])
+        self.assertEqual(places, [None, 'romania'])
+        self.assertEqual([(x['name'], x.get('place')) for x in result['sources']],
+                         [('remotive', None), ('linkedin', None), ('linkedin', 'malta'), ('linkedin', 'romania'),
+                          ('glassdoor', None), ('glassdoor', 'romania')])
+
     def test_errors_keep_their_message_and_the_switch_works(self):
-        def fail(o, job, record=None, runner=None):
+        def fail(o, job, record=None, runner=None, place=None):
             raise glassdoor.GlassdoorError('No open Chrome profile is signed in to LinkedIn.')
         result = self.run_search(fail)
         self.assertEqual(result['status'], 'complete')
         self.assertEqual(result['sources'][2]['message'], 'No open Chrome profile is signed in to LinkedIn.')
-        def never(o, job, record=None, runner=None):
+        def never(o, job, record=None, runner=None, place=None):
             raise AssertionError('Glassdoor should not run')
         result = self.run_search(never, glassdoor=False)
         self.assertEqual([x['name'] for x in result['sources']], ['remotive', 'linkedin'])

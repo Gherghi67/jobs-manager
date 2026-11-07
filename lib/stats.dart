@@ -245,6 +245,23 @@ bool dailyRefreshDue(DateTime? fetched, DateTime? attempted, DateTime now) {
       now.difference(fetched) >= const Duration(days: 1);
 }
 
+// Replies the server's Gmail sync set aside because no application in the
+// list matches them; later checks attach them once the application is added.
+String leftOutNote(Map<String, dynamic> sync) {
+  final left = (sync['left_out'] as List? ?? []).whereType<Map>().toList();
+  if (left.isEmpty) {
+    return '';
+  }
+  final named = left
+      .take(3)
+      .map((e) => '${e['company']} — ${e['subject']}')
+      .join('; ');
+  final more = left.length > 3 ? ' and ${left.length - 3} more' : '';
+  return left.length == 1
+      ? ' 1 reply waits for an application in your list: $named. Add the application and the next check attaches it.'
+      : ' ${left.length} replies wait for an application in your list: $named$more. Add the applications and the next check attaches them.';
+}
+
 String gmailSyncLabel(Map<String, dynamic> sync, DateTime? fetched) {
   final success = DateTime.tryParse((sync['last_success'] ?? '').toString());
   String shortDate(DateTime value) =>
@@ -257,15 +274,16 @@ String gmailSyncLabel(Map<String, dynamic> sync, DateTime? fetched) {
   if (sync['running'] == true) {
     return 'Checking Gmail on the server.$last$refreshed Pull to refresh after it finishes.';
   }
+  final waiting = leftOutNote(sync);
   if (error.isNotEmpty) {
-    return 'Gmail sync needs attention: $error$last$refreshed';
+    return 'Gmail sync needs attention: $error$last$refreshed$waiting';
   }
   if (sync['enabled'] == true) {
     final next = DateTime.tryParse((sync['next_run'] ?? '').toString());
     if (success == null && next != null) {
       return 'First Gmail sync scheduled for ${shortDate(next)}.$refreshed Analytics refresh daily when the app is open. Pull to refresh anytime.';
     }
-    return 'Gmail syncs daily.$last$refreshed Analytics refresh daily when the app is open. Pull to refresh anytime.';
+    return 'Gmail syncs daily.$last$refreshed$waiting Analytics refresh daily when the app is open. Pull to refresh anytime.';
   }
   return 'Analytics refresh daily when the app is open.$refreshed';
 }
