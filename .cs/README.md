@@ -75,6 +75,8 @@ November 7, 2026 (hybrid roles): at the user's request, searches now also keep h
 
 November 7, 2026 (Gmail sync): the check hadn't imported since 22 Oct: first no app password in the running service, then one Micro1 reply with no matching entry blocking every sweep. Replies now link across company names (same thread, or an earlier email naming the sender about the same role), and an unplaced reply waits and is retried instead of blocking the rest. After a dry run on copies, the live sweep imported 15 emails and set aside 4. APK 29900964 shows set-aside replies on the Applied tab. 291 backend and 68 Flutter tests pass. Uncommitted.
 
+November 7, 2026 (feature worktree `cv-tailor`): built CV tailoring. A "Tailor CV" button on a job, or a pasted posting, starts a Claude page chat that follows the resume-tailoring skill in `cv/tailored/<Company>/<Role>/`. Claude asks its gap questions in the chat, then builds the PDF and `Report.md`, and the app's **Your CVs** sheet downloads them. 275 backend and 72 Flutter tests pass. A live end-to-end run on a temporary instance built and served a one-page PDF. Committed as `5839c84` (with notes in `7d6b7e6`) on `cs/cv-tailor`. Not deployed: it lands through `/finish cv-tailor` once the base's uncommitted work is committed.
+
 - Summary: `.cs/summary.md`
 - Durable memory index: `.cs/memory/MEMORY.md`
 - Configured narrative: `.cs/memory/narrative.bogdan-gherghina-erepubliklabs-com.md`

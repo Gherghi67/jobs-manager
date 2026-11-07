@@ -1,3 +1,5 @@
+{"ts":"2026-11-07T13:55:22Z","event":"started","engine":"claude","run_id":"00f42743-0662-4f78-acb3-59a405b476e2","role":"lead","source":"startup","session_id":"d5b8a6c6-4f71-4535-a57b-b938faee1e04","branch":"cs/cv-tailor"}
+{"ts":"2026-11-07T14:48:05Z","event":"ended","source":"prompt_input_exit","session_id":"d5b8a6c6-4f71-4535-a57b-b938faee1e04","engine":"claude","run_id":"00f42743-0662-4f78-acb3-59a405b476e2","branch":"cs/cv-tailor"}
 {"ts":"2026-10-09T12:08:31Z","event":"started","source":"startup","session_id":"6c148bce-e52c-4a69-b3d7-adb144a56b40","branch":"main"}
 {"ts":"2026-10-09T12:39:55Z","event":"ended","source":"clear","session_id":"6c148bce-e52c-4a69-b3d7-adb144a56b40","branch":"main"}
 {"ts":"2026-10-09T12:39:56Z","event":"rotated","from":"6c148bce-e52c-4a69-b3d7-adb144a56b40","to":"09bcf62e-ac7c-4fd0-9d14-2d7c22258362","reason":"rebind"}
